@@ -1,0 +1,46 @@
+# ==========================
+# Pulse-5 Core .gitignore
+# ==========================
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual envs
+venv/
+.env
+.env.*
+
+# Local DB / state
+*.db
+pulse.db
+
+# Logs
+logs/
+*.log
+
+# Heavy exports & media (never commit)
+exports/
+exports/**
+downloads/
+download/
+download/**
+*.tar.gz
+*.zip
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.wav
+*.flac
+
+# Git helper diagnostics
+all-files.txt
+all-objects.txt
+
+# OS / editor junk
+.DS_Store
+*.swp
+.idea/
+.vscode/

@@ -1,0 +1,34 @@
+{
+  "ts": 1763555827.2794766,
+  "date": "20251119",
+  "stats": [
+    {
+      "status": "completed",
+      "mode": "images",
+      "count": 30,
+      "total_items": 300,
+      "total_usd": 0.0
+    },
+    {
+      "status": "completed",
+      "mode": "video",
+      "count": 31,
+      "total_items": 31,
+      "total_usd": 0.0
+    },
+    {
+      "status": "failed",
+      "mode": "images",
+      "count": 31,
+      "total_items": 0,
+      "total_usd": 15.5
+    },
+    {
+      "status": "queued",
+      "mode": "images",
+      "count": 62,
+      "total_items": 0,
+      "total_usd": 3.1
+    }
+  ]
+}
