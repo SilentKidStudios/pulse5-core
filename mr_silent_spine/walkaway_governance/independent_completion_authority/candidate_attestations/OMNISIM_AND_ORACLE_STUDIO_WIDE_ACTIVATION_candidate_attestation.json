@@ -1,0 +1,22 @@
+{
+  "_status": "UNSIGNED_CANDIDATE -- informational packaging of already-computed verifier output for a future independent authority to evaluate. This is NOT an authorization. No component in this repository issues, signs, or acts on this object. founder_priority_state.json has NOT been changed by producing this file.",
+  "_source": "Repackages the real, already-produced completion_verifier.py output at mr_silent_spine/walkaway_governance/verifier_receipts/OMNISIM_AND_ORACLE_STUDIO_WIDE_ACTIVATION_2026-08-31T221320.254599+0000.json into the attestation_schema_v1.json shape. No new checks were run to produce this file -- see that receipt for the 12 checks actually executed.",
+
+  "attestation_version": "1.0",
+  "priority_or_task_id": "OMNISIM_AND_ORACLE_STUDIO_WIDE_ACTIVATION",
+  "completion_contract_id": "OMNISIM_AND_ORACLE_STUDIO_WIDE_ACTIVATION",
+  "completion_contract_version": "1.0",
+  "canonical_classification": "NON_PROTECTED",
+  "verifier_verdict": "VERIFIED_COMPLETE",
+  "verifier_receipt_path": "mr_silent_spine/walkaway_governance/verifier_receipts/OMNISIM_AND_ORACLE_STUDIO_WIDE_ACTIVATION_2026-08-31T221320.254599+0000.json",
+  "verifier_receipt_sha256": "463d8dfdf46bfe9d6dd0232488d7f688b60f418260a7306f041773938fa6ae14",
+  "evidence_set_hash": "5e3aba4ff025cbb6f1dddcdac545954b03f8c4bb01551ec96c6b485091dd69a8",
+  "current_canonical_state": "pending",
+  "requested_transition": "complete",
+  "issued_at": "2026-08-31T22:42:07Z",
+  "expires_at": "2026-08-31T22:47:07Z",
+  "nonce": "ff327a10452e4a6c3f06153fc9f7c4f3",
+  "idempotency_key": "cbe0e9e8bb3f0c9fc341fd08f5ae5acef2a5b62d48049fb048beb47a469bf8ab",
+
+  "_note_on_expires_at": "This candidate is already expired by the time you read it (5-minute window from issuance) -- deliberately, so nothing can later treat this illustrative file as a live, actionable attestation. A real independent authority would compute issued_at/expires_at at its own evaluation time, not reuse this file's values."
+}

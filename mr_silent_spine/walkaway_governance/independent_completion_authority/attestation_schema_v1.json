@@ -1,0 +1,33 @@
+{
+  "schema_id": "independent_completion_attestation_v1",
+  "status": "specification only -- not consumed by any executable component in this repository",
+  "description": "Structured object an INDEPENDENT, non-LLM completion-attestation authority (see SPEC_v1.md) would validate before authorizing a bounded canonical completion transition. This schema is documentation; no code in this repository issues, signs, or consumes an object of this shape.",
+
+  "fields": {
+    "attestation_version": {"type": "string", "required_value": "1.0"},
+    "priority_or_task_id": {"type": "string", "description": "exact canonical item_id: rank_id, or rank_id/component_id"},
+    "completion_contract_id": {"type": "string", "description": "completion contract filename stem under mr_silent_spine/walkaway_governance/completion_contracts/"},
+    "completion_contract_version": {"type": "string", "description": "must equal the contract file's own completion_contract_version field"},
+    "canonical_classification": {"type": "string", "required_value": "NON_PROTECTED"},
+    "verifier_verdict": {"type": "string", "required_value": "VERIFIED_COMPLETE"},
+    "verifier_receipt_path": {"type": "string", "description": "path to the exact completion_verifier.py receipt under mr_silent_spine/walkaway_governance/verifier_receipts/"},
+    "verifier_receipt_sha256": {"type": "string", "description": "sha256 of that receipt file, independently recomputed by the authority at validation time -- never trusted as copied from the attestation payload alone"},
+    "evidence_set_hash": {"type": "string", "description": "sha256 of json.dumps(receipt['check_results'], sort_keys=True, separators=(',', ':'))"},
+    "current_canonical_state": {"type": "string", "enum": ["pending", "in_progress"], "description": "status the authority itself read from founder_priority_state.json at validation time"},
+    "requested_transition": {"type": "string", "required_value": "complete"},
+    "issued_at": {"type": "string", "format": "iso8601-utc"},
+    "expires_at": {"type": "string", "format": "iso8601-utc", "description": "recommended issued_at + 300s"},
+    "nonce": {"type": "string", "description": "random 128-bit value, hex-encoded, single-use"},
+    "idempotency_key": {"type": "string", "description": "sha256(priority_or_task_id + '|' + verifier_receipt_sha256 + '|' + evidence_set_hash)"}
+  },
+
+  "required_values": {
+    "canonical_classification": "NON_PROTECTED",
+    "verifier_verdict": "VERIFIED_COMPLETE",
+    "requested_transition": "complete"
+  },
+
+  "validation_sequence_reference": "See SPEC_v1.md section 4 for the 9-step independent validation sequence performed against live state before this object may authorize anything. No field in this object is self-proving; every field with a corresponding live check must be independently re-derived and compared, not trusted at face value.",
+
+  "authorization_scope": "A valid object of this shape authorizes exactly one thing: the bounded atomic transition of priority_or_task_id's status field to 'complete' in mr_silent_spine/state/founder_priority_state.json, plus one append to completion_transitions_v1.jsonl. It authorizes nothing else -- no worker execution, no further classification, no protected operation of any kind."
+}
