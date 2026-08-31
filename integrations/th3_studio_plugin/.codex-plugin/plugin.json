@@ -1,0 +1,31 @@
+{
+  "name": "th3-studio",
+  "version": "1.0.0",
+  "description": "Governed read-mostly interface to TH3S1L3NTK1D Studios / MR. SILENT, backed by the existing TH3 Studio App and its remote MCP endpoint.",
+  "author": {
+    "name": "TH3S1L3NTK1D Studios",
+    "email": "th3s1l3ntk1d@gmail.com",
+    "url": "https://thesilentkidstudios.com"
+  },
+  "homepage": "https://studio.thesilentkidstudios.com",
+  "repository": "https://github.com/SilentKidStudios/pulse5-core",
+  "license": "UNLICENSED",
+  "keywords": ["studio-ops", "mr-silent", "omnisim", "governance", "read-only"],
+  "skills": "./skills/",
+  "apps": "./.app.json",
+  "interface": {
+    "displayName": "TH3 Studio",
+    "shortDescription": "Governed read-mostly interface to MR. SILENT and TH3S1L3NTK1D Studios",
+    "longDescription": "TH3 Studio connects ChatGPT to the existing TH3S1L3NTK1D Studios remote MCP endpoint (via the existing TH3 Studio App -- no new App, no new server, no new credential). Exposes real-time Studio status, the canonical Founder OmniPriority queue, an OmniRegistry project search, OmniSim scenario analysis, and one bounded write path back into MR. SILENT's governed signal bus. All protected Founder gates (credentials, paid-resource activation, production promotion, model deletion, destructive actions, Scorpio isolation, GPU deletion) remain enforced server-side and are unaffected by installing this plugin -- no client of this plugin, including ChatGPT itself, is a Founder-equivalent identity.",
+    "developerName": "TH3S1L3NTK1D Studios",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://studio.thesilentkidstudios.com",
+    "defaultPrompt": [
+      "Inspect current Studio state. Read only.",
+      "List the TH3 Studio MCP tools available.",
+      "Check the current governing OmniPriority rank."
+    ],
+    "brandColor": "#00E5FF"
+  }
+}

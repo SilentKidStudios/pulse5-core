@@ -1,0 +1,20 @@
+{
+  "name": "th3s1l3ntk1d-studios",
+  "interface": {
+    "displayName": "TH3S1L3NTK1D Studios"
+  },
+  "plugins": [
+    {
+      "name": "th3-studio",
+      "source": {
+        "source": "local",
+        "path": "../../integrations/th3_studio_plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
