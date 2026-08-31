@@ -1,0 +1,186 @@
+{
+  "task_id": "OMNISIM_AND_ORACLE_STUDIO_WIDE_ACTIVATION",
+  "contract_version": "1.0",
+  "classification": "NON_PROTECTED",
+  "checks_run": [
+    "artifact_exists",
+    "artifact_exists",
+    "json_field_check",
+    "json_field_check",
+    "json_field_check",
+    "artifact_hash",
+    "artifact_hash_compare",
+    "command_exit_code",
+    "command_exit_code",
+    "service_health",
+    "service_health",
+    "service_health",
+    "service_health"
+  ],
+  "check_results": [
+    {
+      "type": "artifact_exists",
+      "label": "certification_receipt_exists",
+      "passed": true,
+      "detail": {
+        "path": "/opt/pulse5-core/omnisim/reports/omnisim_v1_certification_20260831.json",
+        "exists": true,
+        "size": 6528
+      }
+    },
+    {
+      "type": "artifact_exists",
+      "label": "certification_report_txt_exists",
+      "passed": true,
+      "detail": {
+        "path": "/root/OMNISIM_V1_CERTIFICATION_REPORT.txt",
+        "exists": true,
+        "size": 4017
+      }
+    },
+    {
+      "type": "json_field_check",
+      "label": "regressions_none",
+      "passed": true,
+      "detail": {
+        "path": "/opt/pulse5-core/omnisim/reports/omnisim_v1_certification_20260831.json",
+        "field_path": "REGRESSIONS",
+        "actual_value": "NONE",
+        "expected_value": "NONE"
+      }
+    },
+    {
+      "type": "json_field_check",
+      "label": "evidence_based_percent_100",
+      "passed": true,
+      "detail": {
+        "path": "/opt/pulse5-core/omnisim/reports/omnisim_v1_certification_20260831.json",
+        "field_path": "OMNISIM_EVIDENCE_BASED_PERCENT",
+        "actual_value": 100,
+        "expected_value": 100
+      }
+    },
+    {
+      "type": "json_field_check",
+      "label": "e2e_certification_pass",
+      "passed": true,
+      "detail": {
+        "path": "/opt/pulse5-core/omnisim/reports/omnisim_v1_certification_20260831.json",
+        "field_path": "OMNISIM_E2E_CERTIFICATION",
+        "actual_value": "PASS",
+        "expected_value": "PASS"
+      }
+    },
+    {
+      "type": "artifact_hash",
+      "label": "live_source_hash_recorded_for_provenance",
+      "passed": true,
+      "detail": {
+        "path": "/opt/pulse5-core/omnisim/api/request_scenario.py",
+        "sha256": "1f9e993ff4d825cca0fbd285f71994f358cb61a8058067a281b35b34601d8693",
+        "mode": "record_only"
+      }
+    },
+    {
+      "type": "artifact_hash_compare",
+      "label": "live_source_still_differs_from_quarantined_compromised_fork",
+      "passed": true,
+      "detail": {
+        "path_a": "/opt/pulse5-core/mr_silent_spine/backups/unauthorized_fork_artifacts_quarantine_20260830T235206Z/omnisim/api/request_scenario.py",
+        "path_b": "/opt/pulse5-core/omnisim/api/request_scenario.py",
+        "sha256_a": "6b3bb6154212f9deced0bb93b014d3e6f347d9c7337745c28afce439489f1a8d",
+        "sha256_b": "1f9e993ff4d825cca0fbd285f71994f358cb61a8058067a281b35b34601d8693",
+        "relation": "differ",
+        "equal": false
+      }
+    },
+    {
+      "type": "command_exit_code",
+      "label": "live_source_compiles",
+      "passed": true,
+      "detail": {
+        "command": [
+          "python3",
+          "-m",
+          "py_compile",
+          "omnisim/api/request_scenario.py"
+        ],
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "stdout_tail": "",
+        "stderr_tail": ""
+      }
+    },
+    {
+      "type": "command_exit_code",
+      "label": "live_source_imports_cleanly_in_isolated_subprocess",
+      "passed": true,
+      "detail": {
+        "command": [
+          "python3",
+          "-c",
+          "import sys; sys.path.insert(0, 'omnisim/api'); import request_scenario"
+        ],
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "stdout_tail": "",
+        "stderr_tail": ""
+      }
+    },
+    {
+      "type": "service_health",
+      "label": "th3_mcp_http_service_active",
+      "passed": true,
+      "detail": {
+        "unit": "th3-mcp-http.service",
+        "actual_state": "active",
+        "expected_state": "active"
+      }
+    },
+    {
+      "type": "service_health",
+      "label": "caddy_service_active",
+      "passed": true,
+      "detail": {
+        "unit": "caddy.service",
+        "actual_state": "active",
+        "expected_state": "active"
+      }
+    },
+    {
+      "type": "service_health",
+      "label": "omnisim_loop_timer_active",
+      "passed": true,
+      "detail": {
+        "unit": "omnisim-loop.timer",
+        "actual_state": "active",
+        "expected_state": "active"
+      }
+    },
+    {
+      "type": "service_health",
+      "label": "mrsilent_division_bus_consumer_service_active",
+      "passed": true,
+      "detail": {
+        "unit": "mrsilent-division-bus-consumer.service",
+        "actual_state": "active",
+        "expected_state": "active"
+      }
+    }
+  ],
+  "artifacts_verified": [
+    "/opt/pulse5-core/omnisim/reports/omnisim_v1_certification_20260831.json",
+    "/root/OMNISIM_V1_CERTIFICATION_REPORT.txt",
+    "/opt/pulse5-core/omnisim/reports/omnisim_v1_certification_20260831.json",
+    "/opt/pulse5-core/omnisim/reports/omnisim_v1_certification_20260831.json",
+    "/opt/pulse5-core/omnisim/reports/omnisim_v1_certification_20260831.json",
+    "/opt/pulse5-core/omnisim/api/request_scenario.py"
+  ],
+  "evidence_hashes": {
+    "/opt/pulse5-core/omnisim/api/request_scenario.py": "1f9e993ff4d825cca0fbd285f71994f358cb61a8058067a281b35b34601d8693"
+  },
+  "verdict": "VERIFIED_COMPLETE",
+  "failure_reasons": [],
+  "timestamp_utc": "2026-08-31T22:13:20.254599+00:00",
+  "validator_version": "completion_verifier_v1"
+}

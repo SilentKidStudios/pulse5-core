@@ -1,0 +1,15 @@
+{
+  "task_id": "MR_SILENT_APP_COMPLETION",
+  "contract_version": null,
+  "classification": "NON_PROTECTED",
+  "checks_run": [],
+  "check_results": [],
+  "artifacts_verified": [],
+  "evidence_hashes": {},
+  "verdict": "DENIED_MISSING_CONTRACT",
+  "failure_reasons": [
+    "no_completion_contract_found_for_item"
+  ],
+  "timestamp_utc": "2026-08-31T22:13:29.321201+00:00",
+  "validator_version": "completion_verifier_v1"
+}

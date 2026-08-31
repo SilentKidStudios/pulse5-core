@@ -1,0 +1,15 @@
+{
+  "task_id": "SCORPIOS_CORNER/SCORPIO_FINISH_001_PRODUCT_WORK",
+  "contract_version": null,
+  "classification": "protected",
+  "checks_run": [],
+  "check_results": [],
+  "artifacts_verified": [],
+  "evidence_hashes": {},
+  "verdict": "DENIED_PROTECTED",
+  "failure_reasons": [
+    "isolation_boundary"
+  ],
+  "timestamp_utc": "2026-08-31T22:13:29.196508+00:00",
+  "validator_version": "completion_verifier_v1"
+}

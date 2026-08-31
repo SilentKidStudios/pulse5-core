@@ -1,0 +1,73 @@
+{
+  "completion_contract_version": "1.0",
+  "task_or_priority_id": "OMNISIM_AND_ORACLE_STUDIO_WIDE_ACTIVATION",
+  "action_type": "omnisim_v1_certification_evidence_review",
+  "required_classification": "NON_PROTECTED",
+
+  "evidence_sources": {
+    "certification_receipt": "omnisim/reports/omnisim_v1_certification_20260831.json",
+    "certification_report_txt": "/root/OMNISIM_V1_CERTIFICATION_REPORT.txt",
+    "live_source_file": "omnisim/api/request_scenario.py",
+    "quarantined_fork_artifact": "mr_silent_spine/backups/unauthorized_fork_artifacts_quarantine_20260830T235206Z/omnisim/api/request_scenario.py",
+    "original_test_suite_reference_only_not_rerun": "omnisim/tests/test_request_scenario.py"
+  },
+
+  "provenance": {
+    "original_receipt_written_by_session": "omnisim",
+    "original_receipt_written_at_utc": "2026-08-31T02:15:00+00:00",
+    "contract_authored_by_session": "walkaway-final",
+    "contract_authored_at_utc": "2026-08-31T22:12:05Z"
+  },
+
+  "freshness_note": "required_checks below independently confirm the underlying facts still hold NOW, at verification time. They are not retroactive proof that the original 2026-08-31T02:15:00Z claims were true at that instant -- no mechanism can prove that after the fact. What they do prove: the certification receipt still exists and still asserts PASS/NONE/100 in its structured fields (not just in prose), the restored source file still differs from the quarantined compromised fork (restoration was not silently reverted), the live source file still compiles and imports cleanly in an isolated subprocess, and the services the original evidence named as unaffected are still active.",
+
+  "required_checks": [
+    {"type": "artifact_exists", "label": "certification_receipt_exists",
+     "path": "omnisim/reports/omnisim_v1_certification_20260831.json"},
+    {"type": "artifact_exists", "label": "certification_report_txt_exists",
+     "path": "/root/OMNISIM_V1_CERTIFICATION_REPORT.txt"},
+
+    {"type": "json_field_check", "label": "regressions_none",
+     "path": "omnisim/reports/omnisim_v1_certification_20260831.json",
+     "field_path": "REGRESSIONS", "expected_value": "NONE"},
+    {"type": "json_field_check", "label": "evidence_based_percent_100",
+     "path": "omnisim/reports/omnisim_v1_certification_20260831.json",
+     "field_path": "OMNISIM_EVIDENCE_BASED_PERCENT", "expected_value": 100},
+    {"type": "json_field_check", "label": "e2e_certification_pass",
+     "path": "omnisim/reports/omnisim_v1_certification_20260831.json",
+     "field_path": "OMNISIM_E2E_CERTIFICATION", "expected_value": "PASS"},
+
+    {"type": "artifact_hash", "label": "live_source_hash_recorded_for_provenance",
+     "path": "omnisim/api/request_scenario.py", "record_only": true},
+    {"type": "artifact_hash_compare", "label": "live_source_still_differs_from_quarantined_compromised_fork",
+     "path_a": "mr_silent_spine/backups/unauthorized_fork_artifacts_quarantine_20260830T235206Z/omnisim/api/request_scenario.py",
+     "path_b": "omnisim/api/request_scenario.py", "relation": "differ"},
+
+    {"type": "command_exit_code", "label": "live_source_compiles",
+     "command": ["python3", "-m", "py_compile", "omnisim/api/request_scenario.py"],
+     "expected_exit_code": 0, "timeout_seconds": 20},
+    {"type": "command_exit_code", "label": "live_source_imports_cleanly_in_isolated_subprocess",
+     "command": ["python3", "-c", "import sys; sys.path.insert(0, 'omnisim/api'); import request_scenario"],
+     "expected_exit_code": 0, "timeout_seconds": 20},
+
+    {"type": "service_health", "label": "th3_mcp_http_service_active",
+     "unit": "th3-mcp-http.service", "expected_state": "active"},
+    {"type": "service_health", "label": "caddy_service_active",
+     "unit": "caddy.service", "expected_state": "active"},
+    {"type": "service_health", "label": "omnisim_loop_timer_active",
+     "unit": "omnisim-loop.timer", "expected_state": "active"},
+    {"type": "service_health", "label": "mrsilent_division_bus_consumer_service_active",
+     "unit": "mrsilent-division-bus-consumer.service", "expected_state": "active"}
+  ],
+
+  "deliberately_not_reverified_this_session": [
+    {
+      "original_evidence_item": "omnisim/tests/test_request_scenario.py (4/4 PASS)",
+      "reason": "Rerunning this suite calls request_scenario() for real, which writes new receipt files under omnisim/ -- a directory tree actively shared with the live, currently-attached 'omnisim' tmux session (confirmed attached via `tmux ls` at contract-authoring time). Re-executing it risks racing with that session's own concurrent file writes -- exactly the cross-session interference this campaign was told to avoid. The compile + clean-import checks above independently confirm the file is syntactically valid and importable in a fresh, isolated subprocess without executing any scenario logic or writing any shared file."
+    },
+    {
+      "original_evidence_item": "process_requests.py bridge round trip; live-loop dry run (7 steps)",
+      "reason": "Same reason -- both write into shared omnisim/ and mr_silent_spine/division_signal_bus/ directories that the live 'omnisim' and 'mrsilent' tmux sessions actively use."
+    }
+  ]
+}
