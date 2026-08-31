@@ -1,0 +1,67 @@
+{
+  "handoff_version": "1.0",
+  "created_at_utc": "2026-08-31T22:30:00Z",
+  "created_by_session": "walkaway-0",
+  "purpose": "Minimal, machine-readable spec for the ONLY remaining piece of the Walk-Away completion chain: a tiny atomic transition adapter that reads a VERIFIED_COMPLETE verdict from completion_verifier.py and writes founder_priority_state.json accordingly. Not implemented in this session, by explicit Founder scope. This file is documentation only -- it performs no action.",
+
+  "input": {
+    "source": "mr_silent_spine.walkaway_governance.completion_verifier.verify_completion(item_id, cfg) -> dict",
+    "gate_on_exactly_two_fields": {
+      "verdict": "VERIFIED_COMPLETE",
+      "classification": "NON_PROTECTED"
+    },
+    "note": "No prose parsing required or supported. check_results/evidence_hashes/artifacts_verified are audit trail only."
+  },
+
+  "preconditions": [
+    "classification == explicitly NON_PROTECTED (re-derived by the adapter itself immediately before writing, not trusted from a verdict computed even seconds earlier)",
+    "verifier receipt exists under mr_silent_spine/walkaway_governance/verifier_receipts/ and its evidence_hashes are present",
+    "canonical current state (read fresh from founder_priority_state.json) is pending or in_progress -- not already complete, not blocked",
+    "no Founder-only gate applies (isolation boundary, protected-gate keyword match, unrecognized gate field)"
+  ],
+
+  "required_adapter_behavior": [
+    "1. Accept only verdict == VERIFIED_COMPLETE and classification == NON_PROTECTED.",
+    "2. Recheck classification itself (do not trust a cached verdict).",
+    "3. Acquire canonical state lock (flock LOCK_EX) before read-modify-write.",
+    "4. Re-read canonical state fresh and revalidate the VERIFIED_COMPLETE receipt still applies.",
+    "5. Atomically transition status pending/in_progress -> complete for exactly the one item_path, via write-to-temp-file-in-same-directory + os.replace(); every other field/rank untouched.",
+    "6. Append one append-only audit record (item_id, prior_state, resulting_state, contract_path, contract_version, verifier_receipt_path, evidence_hashes, idempotency_key, authorization_basis, timestamp_utc) to a NEW ledger.",
+    "7. Use an idempotency key so a duplicate call is a safe no-op, not a duplicate transition.",
+    "8. Release the lock.",
+    "9. Do nothing else -- no work-item creation, no worker selection, no delegation. The write to founder_priority_state.json IS the trigger."
+  ],
+
+  "do_not": [
+    "Use free-form AI judgment to decide completion -- gate only on verdict==VERIFIED_COMPLETE.",
+    "Accept prose PASS alone as evidence.",
+    "Alter protected/isolated items regardless of any evidence presented.",
+    "Create another governor, scheduler, queue, runtime, timer, cron, or daemon -- reuse the existing event/fallback pair below.",
+    "Assume that routing this adapter-building task through a different AI engineering adapter (Codex, Omni Engineer) makes the resulting completion authority independent of the AI-operated pipeline it lives in -- it does not; see caveat below."
+  ],
+
+  "canonical_state_store_path": "mr_silent_spine/state/founder_priority_state.json (the 'ranks' map; NEVER founder_top10_priority_queue.json, which is a documented read-cache projection, not source of truth)",
+  "canonical_lock_path": "Does not exist yet. The adapter must create and hold mr_silent_spine/state/.founder_priority_state.lock (flock LOCK_EX) across steps 3-8 above.",
+  "verifier_structured_interface": "mr_silent_spine/walkaway_governance/completion_verifier.py :: verify_completion(item_id, cfg=None) -> dict (fields: task_id, contract_version, classification, checks_run, check_results, artifacts_verified, evidence_hashes, verdict, failure_reasons, timestamp_utc, validator_version)",
+  "event_wakeup_path": "/etc/systemd/system/founder-free-studio-runtime.path (PathModified=mr_silent_spine/state/founder_priority_state.json) -> founder-free-studio-runtime.service -> walkaway_advance.run_cycle(). Fallback: /etc/systemd/system/founder-free-studio-runtime.timer (OnBootSec=5min OnUnitActiveSec=15min). Both pre-existing, unmodified by this or the prior session.",
+
+  "existing_registered_engineering_dispatch_found": true,
+  "existing_registered_engineering_dispatch": {
+    "governed_work_item_submission_and_worker_routing_entrypoint": "mrsilent_bridge/task_router.py :: route(task: dict) -> dict -- routes {task_type, capability_id?, adapter?, description, founder_approved?, requested_by?} to one of ADAPTERS = {claude_code, codex, local_model, omni_engineer, human_escalation} via studio_router.select() (cheapest/lowest-risk capable adapter) or an explicit adapter/capability_id.",
+    "codex_adapter": "mrsilent_bridge/codex_bridge.py :: submit_job(task, requested_by=..., founder_approved=..., ...) -> JobResult; also mrsilent_bridge/adapters/codex_adapter.py as the task_router-facing wrapper.",
+    "omni_engineer_adapter": "mrsilent_bridge/adapters/omni_engineer_adapter.py (also mrsilent_bridge/omniengineer_agent.py, omniengineer_harness.py).",
+    "other_registered_adapters": ["mrsilent_bridge/adapters/claude_code_adapter.py", "mrsilent_bridge/adapters/local_model_adapter.py", "mrsilent_bridge/adapters/human_escalation_adapter.py"],
+    "authority_classifier": "mrsilent_bridge/authority_policy.py :: classify(task_description, requested_tools, sandbox_root, source_paths, founder_approved, adapter) -> PolicyDecision (risk_class, approval_state, reasons); doctrine 'UNLIMITED OUTSIDE CAPABILITY, EXTREMELY LIMITED OUTSIDE AUTHORITY' -- unknown tools/paths/keywords default to FOUNDER_GATED, not allowed.",
+    "governed_job_ledger": "mrsilent_bridge/job_ledger.py, mrsilent_bridge/audit.py :: record(...)",
+    "no_new_infrastructure_needed": true
+  },
+
+  "important_caveat_not_a_workaround": "authority_policy.py already, independently of this campaign, makes Codex UNCONDITIONALLY founder-gated (GATED_ADAPTERS = {'codex'}) regardless of task content -- submit_job() returns rejected_policy unless a human passes founder_approved=True. Any adapter (Claude Code or Omni Engineer included) that needs to run this repo's test suite requests Bash, which is a GATED_TOOL, forcing the same FOUNDER_GATED path. So dispatching the transition-adapter-building task through task_router.route() will not, and structurally cannot, bypass a human checkpoint by picking a different execution engine -- that checkpoint is enforced by this codebase's own pre-existing, independently-designed policy layer, not by anything added in this session. This is a second, separate confirmation of the same conclusion recorded in completion_verifier.py's module docstring and in walkaway_governance_campaign_receipt_20260831T202259Z.json's addendum: no in-repo AI adapter choice substitutes for a genuinely separate authority at the point completion is actually granted.",
+
+  "recommended_first_step_for_the_registered_entrypoint": "task_router.route({'task_type': 'engineering', 'description': '<this handoff file's contents>', 'requested_by': 'walkaway_governance_completion_verifier_handoff', 'founder_approved': False}) to get an honest PENDING/FOUNDER_GATED classification and an audited queue record. The founder_approved=True grant itself must be a real, separate human action -- not something any part of this dispatch chain can supply on its own behalf.",
+
+  "final_certification_still_required_after_adapter_exists": [
+    "Cycle 1: VERIFIED_COMPLETE -> autonomous canonical completion -> immediate event wakeup -> governor advance -> next work creation -> worker selection -> delegation",
+    "Cycle 2: repeat without further human intervention"
+  ]
+}
