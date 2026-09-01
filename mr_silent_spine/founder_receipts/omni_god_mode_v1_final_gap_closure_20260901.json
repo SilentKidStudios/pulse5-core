@@ -7,6 +7,14 @@
 
   "boundary_respected": "The autonomous completion-controller was not implemented, retried, or promoted. mrsilent_bridge/manual_candidates/ was used only as a NEGATIVE test fixture (proving it gets excluded), never as a real source_paths input. No other active session's files were touched (confirmed: mr_silent_spine/walkaway_governance/ledger/walkaway_governance_ledger_v1.jsonl shows a large, ongoing modification from an unrelated live process -- verified via git diff/git log that this session made zero writes to it, and it was never staged).",
 
+  "bonus_finding_stale_test_cache_fix": {
+    "discovered_via": "the new TEST_FAILURE live-deterministic-fixture test (section 3), which genuinely overwrites a real test file and re-runs real validation twice against the SAME sandbox -- found flaky under repeated stress-testing (1 failure in ~11 runs before the fix, 0 in 8 runs after)",
+    "root_cause": "validation.py::check_tests() invoked `python3 -m pytest . -q` with no cache isolation. pytest's assertion-rewrite cache and __pycache__ are keyed by (path, mtime, size) -- a decomposed job's repair cycle can overwrite a test file and re-validate within the same filesystem mtime granularity, risking a STALE compiled assertion running against the CURRENT source text. Observed live: a corrected `assert add(2, 2) == 4` failed with the impossible-looking `assert 4 == 5` -- the displayed source line was current, but the executed (stale, cached) literal was the OLD wrong value.",
+    "why_this_matters": "this is a real, if narrow, correctness risk in the VALIDATION TRUTH GATE itself (not merely a test-harness quirk) -- exactly the kind of gap this campaign's own VALIDATION_FIRST principle depends on being trustworthy, especially now that TEST_FAILURE repair cycles are a proven, real, live mechanism.",
+    "fix": "validation.py::check_tests() now clears __pycache__/.pytest_cache under the sandbox (cache-only artifacts, never user source) immediately before every real test run, and passes `-p no:cacheprovider` to pytest itself. Scoped entirely to check_tests() -- the shared _run_allowlisted()/minimal_env() infrastructure used by every other validator and by bridge.py's agent invocation was NOT touched.",
+    "verification": "8/8 clean stress-test runs after the fix (0/8 before, ~1 failure per 11 runs); full regression suite re-run clean (220+23 script-mode checks, 99+12 pytest tests, 0 failures)."
+  },
+
   "1_exact_gap_reconciliation": {
     "SOURCE_PATH_GAP": "confirmed by reading current code (not recollection): evolution/proposal.py's Proposal dataclass had NO source_paths field at all; evolution/advance.py::_run_omni_engineer() never passed source_paths to submit_job_auto() (deliberate, per its own docstring, to preserve 'no recursive self-modification').",
     "THREE_LIVE_UNPROVEN_RETRY_CLASSES": ["TEST_FAILURE", "CONTEXT_PRESSURE", "PARTIAL_IMPLEMENTATION"],
@@ -81,7 +89,7 @@
   "6_god_mode_v1_final_certification": {
     "TOOL_CALL_RECOVERY": "PROVEN", "FINISH_DISCIPLINE": "PROVEN", "TASK_DECOMPOSITION": "PROVEN", "CHECKPOINT_RESUME": "PROVEN",
     "ADAPTIVE_RETRY": "PROVEN for 8/9 classes (unit+live or live-deterministic-fixture); PROVIDER_FAILURE has real code + unit-test proof, live proof BLOCKED by disclosed infrastructure (no local Ollama blob access on this machine, no alternate free provider) -- not an engineering gap",
-    "VALIDATION_FIRST": "PROVEN, decisively, live, twice now", "CONTEXT_STAGING": "PROVEN, end-to-end, this session (closes the last CONTEXT_STAGING gap)",
+    "VALIDATION_FIRST": "PROVEN, decisively, live, twice now -- and MADE MORE TRUSTWORTHY this session by fixing a real stale-test-cache correctness risk found via the new TEST_FAILURE fixture (see bonus_finding_stale_test_cache_fix)", "CONTEXT_STAGING": "PROVEN, end-to-end, this session (closes the last CONTEXT_STAGING gap)",
     "ENGINEERING_MEMORY_USE": "CONFIRMED EXISTING (unaffected)", "MULTI_MODEL_FAILOVER": "PROVEN, live, again",
     "MULTI_PROVIDER_FAILOVER": "PROVEN at whole-job level (pre-existing); phase-level mechanism real+unit-tested, live proof BLOCKED by the same disclosed infrastructure limitation as ADAPTIVE_RETRY's PROVIDER_FAILURE sub-class",
     "CANONICAL_ESCALATION": "PROVEN", "COMPLEX_JOB_AUTONOMOUS_EXECUTION": "PROVEN, live, again",
@@ -102,11 +110,12 @@
     "mrsilent_bridge/omniengineer_harness.py",
     "mrsilent_bridge/evolution/advance.py",
     "mrsilent_bridge/evolution/proposal.py",
+    "mrsilent_bridge/validation.py",
     "mrsilent_bridge/tests/test_omniengineer.py",
     "mrsilent_bridge/tests/test_th3_omni_router_integration.py"
   ],
   "files_created": ["mr_silent_spine/founder_receipts/omni_god_mode_v1_final_gap_closure_20260901.json"],
-  "test_results": "0 failures across 220+23 script-mode checks and 99 pytest tests",
+  "test_results": "0 failures across 220+23 script-mode checks and 99+12+33 pytest tests, including an 8/8 stress-test confirming the stale-test-cache fix",
   "regressions": 0,
 
   "completion_controller_implemented": false,
