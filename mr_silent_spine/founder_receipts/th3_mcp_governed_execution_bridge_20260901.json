@@ -72,5 +72,49 @@
   "render_gpu_protections_touched": false,
   "secret_value_ever_printed": false,
 
-  "next_step": "Founder refreshes TH3 Studio v2 actions in ChatGPT Work. The live canary proposal (8f90f970-...) will be picked up by the real mrsilent-autonomous-cycle.timer within 15 minutes if still eligible; check its state with work_result."
+  "next_step": "Founder refreshes TH3 Studio v2 actions in ChatGPT Work. The live canary proposal (8f90f970-...) will be picked up by the real mrsilent-autonomous-cycle.timer within 15 minutes if still eligible; check its state with work_result.",
+
+  "closeout_20260901T0345Z": {
+    "status": "PASS -- with one honestly-recorded certification exception, not hidden",
+
+    "canary_actual_outcome": {
+      "picked_up_by_real_timer_at": "2026-09-01T03:17:20Z (~4 min after remote submit_work, well inside the 15-min cadence)",
+      "engine_selected": "claude_code_engineer_v1 (metered_api)",
+      "reached": "promotion_candidate",
+      "then": "manually rejected by the Founder directly in this session at 2026-09-01T03:40:19Z",
+      "final_status": "rejected (closed, terminal, not eligible for further auto-advance)"
+    },
+
+    "evidence_preserved_not_destroyed": {
+      "proposal_history": "intact, all 6 events present (created -> proposed -> implemented -> tested -> canary -> promotion_candidate -> rejected)",
+      "job_ledger_record": "8e6534db-eb7e-4c44-8269-ac3f61eec7a1, state=completed, intact",
+      "sandbox_dir": "/opt/pulse5-core/mrsilent_bridge/jobs/8e6534db-eb7e-4c44-8269-ac3f61eec7a1/ -- ledger.json, result.json, validation.json, stdout.txt, stderr.txt, workdir/ all present and untouched by this closeout; nothing deleted",
+      "audit_log": "2 matching entries in mrsilent_bridge/audit_log/audit.jsonl, both intact"
+    },
+
+    "real_target_verification": {
+      "sandbox_generated_file": "workdir/mrsilent_bridge/campaigns/README.md (inside the sandbox only)",
+      "real_path_checked": "/opt/pulse5-core/mrsilent_bridge/campaigns/README.md",
+      "real_path_result": "does not exist -- confirmed via direct filesystem check",
+      "git_status_of_real_campaigns_dir": "unchanged (pre-existing untracked dir, no new file)",
+      "promotion_events_found": 0,
+      "conclusion": "REAL_TARGET_MODIFIED=NO, confirmed by direct evidence, not inference"
+    },
+
+    "no_paid_action_certification": {
+      "result": "NOT_PROVEN / FAIL_CONDITION",
+      "why": "The live implementation_router's own audit record shows the actual selection reason verbatim: 'default engineering priority: Claude Code primary, Omni Engineer fallback (claude_code duty=low/0.1, omni_engineer duty=low/0.4) -- no evidence yet justifies preferring Omni Engineer'. Both omni_engineer_v1 (free/local) and claude_code_engineer_v1 (metered_api) were eligible candidates in studio_router.rank(); the tie-break came from a duty-cycle weighting inside evolution/advance.py._rank_engineering_engines() that currently favors Claude Code as PRIMARY, not from cost/locality. This directly contradicts the mrsilent_bridge/README.md's stated doctrine ('OmniEngineer-first, Claude-Code-fallback') -- the documentation is stale relative to live behavior. Not hidden or normalized: recorded here verbatim from the real audit_log entry."
+    },
+
+    "free_local_only_constraint_investigation": {
+      "method": "read-only code inspection of studio_router.rank()/select() and evolution/advance.py._rank_engineering_engines()/_implementation_router()",
+      "finding": "No existing parameter, flag, or canonical mechanism lets a caller constrain routing to free/local-only. studio_router.rank() surfaces cost_class per candidate but does not filter by it. The actual engine choice among accepted candidates is made by _rank_engineering_engines()'s internal duty-cycle weighting, which is not caller-configurable and currently favors claude_code.",
+      "options_considered_and_rejected": [
+        "Adding a free-only filter/parameter to the router -- rejected: would be engineering a new constraint into the canonical router, which this campaign was explicitly told not to do",
+        "Manually marking claude_code_engineer_v1 as quota-limited in the registry to force omni_engineer selection -- rejected: this would be gaming/tampering with live capability data to manufacture a predetermined outcome, not a genuine existing constraint, and would itself be a form of hidden manipulation",
+        "Running a second canary anyway and hoping duty-cycle favors omni_engineer this time -- rejected: not deterministic, and the audit evidence shows the current duty weighting (0.1 vs 0.4) actively favors claude_code, so a second attempt would most likely repeat the same paid selection rather than prove a free-only path"
+      ],
+      "conclusion": "No genuine canonical free/local-only constraint exists today. No second canary was run."
+    }
+  }
 }
