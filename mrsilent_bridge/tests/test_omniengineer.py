@@ -1969,6 +1969,54 @@ def test_run_phase_falls_over_to_provider_b_when_ollama_candidates_exhausted() -
     check("provider_b attempt is recorded in attempt_history", attempt_history[-1]["provider"] == "provider_b", attempt_history)
 
 
+def test_run_phase_fails_closed_not_crashed_when_llama_server_binary_is_missing() -> None:
+    """GOD_MODE_V1 FINAL PROVIDER_B CLOSURE regression: a real, reproduced
+    bug found this session -- provider_b_bridge.ensure_running() raises an
+    UNCAUGHT FileNotFoundError (not ModelArtifactMissing) when its
+    llama-server binary itself is absent (confirmed live on this machine:
+    a locally-manifested model reaches subprocess.Popen() and crashes).
+    Every ensure_running() call site must now treat FileNotFoundError
+    identically to ModelArtifactMissing -- fail closed (provider_b
+    unavailable, fall through), never propagate and crash the job."""
+    import provider_b_bridge
+    original_run = harness.run_agent_loop
+    original_check = _mrsilent_test_local_model_health.check
+    original_order = _mrsilent_test_local_model_health.engineering_failover_order
+    original_circuit_open = _mrsilent_test_local_model_health.circuit_is_open
+    original_ensure_running = provider_b_bridge.ensure_running
+
+    def runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        return _god2_fake_run("error", "ollama model failed")  # always retryable -- forces the provider_b attempt
+
+    def raise_missing_binary(**k):
+        raise FileNotFoundError(2, "No such file or directory", "/usr/local/lib/ollama/llama-server")
+
+    _mrsilent_test_local_model_health.check = lambda **k: type("H", (), {"available": True, "models": ["m1"]})()
+    _mrsilent_test_local_model_health.engineering_failover_order = lambda exclude=None: [m for m in ["m1"] if m not in (exclude or [])]
+    _mrsilent_test_local_model_health.circuit_is_open = lambda provider: False
+    provider_b_bridge.ensure_running = raise_missing_binary
+    harness.run_agent_loop = runner
+    tmp = Path(tempfile.mkdtemp())
+    raised: Exception | None = None
+    try:
+        run, mdl, attempted, attempt_history = harness._run_phase(
+            "implement", "objective", tmp, parent_task="x", prior_summary="",
+            model="m1", max_iterations=6, timeout_s=60,
+        )
+    except Exception as e:  # noqa: BLE001 — this IS the failure mode under test
+        raised = e
+    finally:
+        harness.run_agent_loop = original_run
+        _mrsilent_test_local_model_health.check = original_check
+        _mrsilent_test_local_model_health.engineering_failover_order = original_order
+        _mrsilent_test_local_model_health.circuit_is_open = original_circuit_open
+        provider_b_bridge.ensure_running = original_ensure_running
+
+    check("_run_phase() does NOT crash with an uncaught FileNotFoundError", raised is None, raised)
+    check("the phase still returns its real (ollama-failure) outcome, never a fabricated success",
+          raised is None and run.final_action == "error", run.final_action if raised is None else None)
+
+
 if __name__ == "__main__":
     test_system_prompt_matches_seeded_source_guard_v2()
     test_write_and_read_roundtrip()
@@ -2033,6 +2081,7 @@ if __name__ == "__main__":
     test_phase_narrative_preserves_earlier_model_progress_after_later_model_failure()
     test_no_progress_detection_stops_before_exhausting_every_candidate_model()
     test_run_phase_falls_over_to_provider_b_when_ollama_candidates_exhausted()
+    test_run_phase_fails_closed_not_crashed_when_llama_server_binary_is_missing()
     test_full_target_loop_live()
 
     print()

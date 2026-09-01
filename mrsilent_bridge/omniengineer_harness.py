@@ -726,10 +726,14 @@ def _execute(
                     and not local_model_health.circuit_is_open("provider_b")):
                 try:
                     pb_health = provider_b_bridge.ensure_running()
-                except provider_b_bridge.ModelArtifactMissing as exc:
-                    # Optional Provider B has no usable Pulse-local model
-                    # artifact. This is backend unavailability, not an
-                    # unhandled Omni Engineer runtime failure.
+                except (provider_b_bridge.ModelArtifactMissing, FileNotFoundError) as exc:
+                    # GOD_MODE_V1 FINAL PROVIDER_B CLOSURE: Provider B is
+                    # unavailable either because it has no usable local
+                    # model artifact (ModelArtifactMissing) OR because its
+                    # llama-server binary itself is missing on this machine
+                    # (FileNotFoundError from subprocess.Popen) -- both are
+                    # honest backend unavailability, never an unhandled
+                    # Omni Engineer runtime failure/crash.
                     pb_health = None
                     provider_b_artifact_error = str(exc)
                     local_model_health.record_provider_outcome(
@@ -906,12 +910,14 @@ def _execute(
                 import provider_b_bridge
                 try:
                     pb_health = provider_b_bridge.ensure_running()
-                except provider_b_bridge.ModelArtifactMissing as exc:
+                except (provider_b_bridge.ModelArtifactMissing, FileNotFoundError) as exc:
                     # Provider B is an optional cross-provider fallback.
-                    # A missing local model artifact means this backend is
-                    # unavailable; it must not terminate the parent Omni
-                    # Engineer job. Record the evidence and continue through
-                    # the pre-existing governed fallback path below.
+                    # A missing local model artifact OR a missing
+                    # llama-server binary (FileNotFoundError) both mean
+                    # this backend is unavailable; neither may terminate
+                    # the parent Omni Engineer job. Record the evidence and
+                    # continue through the pre-existing governed fallback
+                    # path below.
                     pb_health = None
                     model_failure_reasons[provider_b_bridge.DEFAULT_MODEL] = (
                         f"provider_b_unavailable: {exc}"
@@ -1640,7 +1646,7 @@ def _run_phase(
                     import provider_b_bridge
                     try:
                         pb_health = provider_b_bridge.ensure_running()
-                    except provider_b_bridge.ModelArtifactMissing:
+                    except (provider_b_bridge.ModelArtifactMissing, FileNotFoundError):
                         pb_health = None
                     if pb_health is not None and pb_health.available:
                         current_model = provider_b_bridge.DEFAULT_MODEL
