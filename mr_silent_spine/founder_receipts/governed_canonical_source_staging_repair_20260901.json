@@ -86,7 +86,7 @@
     "TESTS": "97 pytest passed + 4/4 script-mode files ALL TESTS PASSED (test_omniengineer.py, test_bridge_ledger.py, test_th3_omni_router_integration.py, test_evolution_advance.py)",
     "CANARY": "PASS -- live Proposal->advance_one()->omni_engineer->promotion_candidate, authorized source staged and read, zero production writes, cleaned up to REJECTED",
     "REGRESSIONS": 0,
-    "COMMIT": "PENDING (added to this same receipt after commit)",
+    "COMMIT": "44d905c",
     "PUSH": "PENDING",
     "PRODUCTION_PROMOTION_OCCURRED": false,
     "PROTECTED_GATES_PRESERVED": true,
