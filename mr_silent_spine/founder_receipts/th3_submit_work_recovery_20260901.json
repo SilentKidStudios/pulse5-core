@@ -1,0 +1,78 @@
+{
+  "created_utc": "2026-09-01T21:16:00Z",
+  "campaign": "TH3_SUBMIT_WORK_RECOVERY",
+  "status": "RECOVERED. Root cause identified with direct evidence, smallest possible repair applied (a service restart, zero code changes), verified via 3 independent real calls through the actual canonical HTTP transport, 0 regressions.",
+
+  "preamble_on_scope_caution": "The initial request in this thread ('CT — TH3 SUBMIT_WORK RECOVERY') asserted a blocker using terminology (ChatGPT Work, God Mode Journey 10.7, a 'canonical escalation bus', a specific idempotency key) that did not match anything found anywhere in this session's extensive direct reading of the real codebase, and asked for a code 'repair' before any failure had been independently reproduced. Before touching anything, the real, live system was checked directly via the actual read-only MCP status tools (studio_status, runtime_health, capability_status) -- all reported a normal, healthy state, and th3-mcp-http.service showed active/running. This was reported back honestly, an 'escalation bus' was confirmed to not be a real project component, and no action was taken on the unverified claim. A follow-up message then asked for exactly this: reproduce first, repair only if reproduced. This receipt documents that bounded, evidence-first process.",
+
+  "root_cause": {
+    "summary": "th3-mcp-http.service (the real, canonical HTTP/remote MCP transport -- the actual path an external client like ChatGPT Work reaches via the documented approved reverse proxy) is a long-running Python process (Type=simple, no code hot-reload). It had been running continuously since 2026-09-01 06:07:56 EDT. Earlier in this SAME session (12:29:57 EDT), a prior, unrelated, already-committed piece of work in this session (the 'GOD_MODE_V1 FINAL GAP CLOSURE' campaign) added a new source_paths field to evolution/proposal.py's Proposal dataclass and threaded it through proposal_mod.create(). That code change was correct on disk from the moment it was written -- but the already-running th3-mcp-http.service process never picked it up, because Python does not hot-reload already-imported modules in a long-running process. Every submit_work call handled by that stale process hit a genuine, reproducible TypeError inside Proposal.__init__() (source_paths being passed by the now-newer create() logic against the still-old, in-process-cached Proposal class shape), which is exactly the failure signature independently confirmed in services/th3_mcp/logs/http_error.log ('tool_call_exception tool=submit_work err=TypeError(\"Proposal.__init__() got an unexpected keyword argument 'source_paths'\")'), recurring from 16:03:43 through 16:55:55 EDT -- i.e. after the code change, before any restart.",
+    "confirmed_not_a_code_bug": "Direct verification: (1) fresh Python introspection of evolution.proposal.Proposal.__init__ under the exact sys.path th3_mcp uses shows source_paths correctly present; (2) a direct call to proposal_mod.create() succeeded cleanly; (3) a direct call to tools.submit_work() (the exact real function) succeeded cleanly and created a real Proposal. All three prove the actual source code was already correct -- the defect was purely an unrestarted long-running process holding stale in-memory module state.",
+    "secondary_finding_not_the_root_cause_but_explains_an_earlier_dead_end": "This Claude session's own mcp__th3-studio__* tool calls do NOT go through th3-mcp-http.service at all -- they go through a separate MCP *stdio*-transport process (services/th3_mcp/server.py), confirmed to be a direct child process of this session's own Claude Code process (PID 224543, parent PID 224429 == this session's own 'claude' process), started at 11:21:44 EDT -- also before the 12:29:57 code change, and therefore also stale for the identical reason, but ENTIRELY SEPARATE from the HTTP transport ChatGPT Work actually uses. This is why an initial restart of th3-mcp-http.service appeared not to fix anything when re-tested via this session's own mcp__th3-studio__submit_work tool -- that tool call was hitting the unrelated stale stdio process the whole time, not the (already correctly restarted) HTTP service. This stdio process was NOT restarted or touched, since doing so risks this session's own live MCP connection and is unnecessary for the stated mission (the real, external, Work-facing path is the HTTP transport)."
+  },
+
+  "repair_performed": {
+    "action": "systemctl restart th3-mcp-http.service",
+    "code_changes": "NONE -- the source code (mrsilent_bridge/evolution/proposal.py) was already correct from earlier in this session; this was purely an operational restart to load already-correct, already-on-disk code into a long-running process's memory.",
+    "why_this_is_the_smallest_evidence_backed_repair": "Restart=always is already the service's own designed resilience posture; restarting on a code deployment is completely standard, expected operational practice for a Type=simple systemd service with no hot-reload mechanism, not a workaround or a deviation from normal operation.",
+    "verified_before_acting": "Directly reproduced the exact failure via the real MCP submit_work tool BEFORE making any change (confirmed: 'tool error: Proposal.__init__() got an unexpected keyword argument 'source_paths''), and confirmed no orphaned/partial Proposal existed on disk from the failed attempts (the exception occurs inside the Proposal constructor itself, before evolution/proposal.py's own save(p) call ever runs)."
+  },
+
+  "verification_after_repair": {
+    "method": "3 independent real calls directly against the actual HTTP transport (http://127.0.0.1:7443/mcp, the loopback endpoint the approved reverse proxy forwards to -- the genuine path an external client reaches), using the real bearer token from secure_keys/th3_mcp_http_bearer.key (read only to construct one Authorization header for these test requests; never displayed, logged, or persisted anywhere).",
+    "full_request_result": {
+      "http_status": 200, "accepted": true,
+      "work_id": "71734186-359e-49f8-8cf0-6f293a90893d",
+      "classification": "low", "founder_approval_required": false,
+      "idempotency_key_used": "claude-session-http-transport-canary-20260901T2115"
+    },
+    "idempotency_duplicate_protection_result": {
+      "second_identical_call": {"http_status": 200, "accepted": true, "work_id": "71734186-359e-49f8-8cf0-6f293a90893d (same)", "idempotent_reuse": true, "note": "An open proposal with this same objective/idempotency_key already exists; returning it instead of creating a duplicate."},
+      "durable_confirmation": "exactly 1 file (71734186-359e-49f8-8cf0-6f293a90893d.json) exists on disk under evolution/proposals/ for this work_id -- confirmed via direct filesystem grep, not just the API's own claim"
+    },
+    "minimal_request_result": {
+      "http_status": 200, "accepted": true,
+      "work_id": "c54da3a0-275e-49b5-b371-0dac93501b41",
+      "classification": "founder_gated", "founder_approval_required": true,
+      "note": "objective + idempotency_key only, no task_type -- correctly classified founder_gated / default-deny on ambiguous task_type, exactly per the module's documented default-deny doctrine. This is CORRECT, SAFE behavior, not a defect -- it additionally re-confirms the protected-gate/default-deny logic is intact and functioning after the restart."
+    },
+    "proposal_content_spot_check": "both created Proposals independently read from disk: origin='ct_mcp_bridge' (confirms genuine TH3-MCP-path origin, not a different pipeline), paid_resources_allowed=false, source_paths=[] (confirms the very field that caused the original bug is now present and correctly defaulted), status='observed'."
+  },
+
+  "hard_boundaries_confirmed": {
+    "UNAUTHORIZED_PAID_USAGE": false,
+    "PRODUCTION_PROMOTION_OCCURRED": false,
+    "CREDENTIAL_CHANGES": false,
+    "PROTECTED_GATES_PRESERVED": true,
+    "PROTECTED_GATES_EVIDENCE": "the minimal-request canary was independently, correctly classified founder_gated/default-deny by the SAME unmodified authority logic (tools.py::_first_pass_classify + evolution/advance.py's own authority_policy.classify() re-check at execution time, neither touched this pass) -- proving the gate is not just untouched in code but observably still functioning after the fix.",
+    "MANUAL_CANDIDATES_USED": false,
+    "AUTOPILOT_SERVICES_REVIVED": false,
+    "PROPOSAL_GOVERNANCE_BYPASSED": false,
+    "OTHER_ACTIVE_SESSION_FILES_MODIFIED": false,
+    "note_on_other_session": "the OTHER stdio server.py process (PID 197384, a different parent process, not this session's) was identified during diagnosis but was NOT touched, inspected further, or disrupted in any way."
+  },
+
+  "regression_check": "mrsilent_bridge/tests/test_proposal_experience.py + test_test_isolation_proposal_teardown.py + test_evolution_advance.py: 26 passed, 0 failed, 0 regressions -- confirms the underlying source_paths code (unchanged this pass, already correct from earlier in this session) remains sound.",
+
+  "leftover_artifacts_disclosed": "3 harmless, low-risk, non-protected diagnostic Proposals were created during root-cause verification and left in place as durable evidence (consistent with this session's established practice of disclosing rather than hiding test artifacts): work_id 71734186-... (full request, status=observed, risk=low), work_id c54da3a0-... (minimal request, status=observed, risk=founder_gated -- will sit until a human reviews it, exactly as designed), and one earlier direct-script test Proposal (80f92094-...) created before the HTTP-transport-specific tests were designed. None were promoted; none require any action.",
+
+  "files_changed": [],
+  "files_created": ["mr_silent_spine/founder_receipts/th3_submit_work_recovery_20260901.json"],
+  "note_on_scope": "No repository source code was changed this pass -- the fix was operational (a service restart) applied to already-correct, already-committed code from earlier in this session.",
+
+  "final_report": {
+    "ROOT_CAUSE": "th3-mcp-http.service was a long-running process that had not been restarted since an earlier, unrelated, already-correct code change in this same session added a new field to the Proposal dataclass -- Python does not hot-reload an already-imported module in a running process.",
+    "SUBMIT_WORK_RECOVERED": true,
+    "MINIMAL_REQUEST": "PASS",
+    "FULL_REQUEST": "PASS",
+    "IDEMPOTENCY": "PASS",
+    "CANARY": "PASS -- TH3_MCP_TO_MR_SILENT_SUBMIT_WORK=PASS, no production promotion",
+    "TESTS": "26 (test_proposal_experience.py + test_test_isolation_proposal_teardown.py + test_evolution_advance.py)",
+    "REGRESSIONS": 0,
+    "PRODUCTION_PROMOTION_OCCURRED": false,
+    "UNAUTHORIZED_PAID_USAGE": false,
+    "PROTECTED_GATES_PRESERVED": true
+  },
+
+  "next_step": "Return to CT/Work. Resume God Mode Journey 10.7 through TH3 MCP from live canonical state -- the campaign/journey-specific terminology itself was never independently corroborated in this repo and is outside what this session can verify; only the technical submit_work path recovery is being reported as fact."
+}
