@@ -1,0 +1,82 @@
+{
+  "created_utc": "2026-09-01T07:50:00Z",
+  "campaign": "OMNI_ENGINEER_CODEX_GOD_MODE_V1_RELIABILITY_CONVERGENCE",
+  "status": "PARTIAL -- evidence-based, not 100%, per this campaign's own explicit instruction not to report 100% unless every criterion has real passing evidence",
+
+  "flagged_before_proceeding": {
+    "regression_job_6978adf2_is_the_completion_controller_job": "The 'known live failure' this campaign named as its primary regression target is not a neutral engineering task. Its own job_ledger record shows requested_by='Founder_CT_completion_controller_campaign' and its task text opens 'OMNI ENGINEER CODEX — BOUNDED DETERMINISTIC COMPLETION CONTROLLER ... MISSION: Implement the final missing deterministic completion-controller'. This is residue from a prior, standalone (non-governed -- see below) attempt at exactly the autonomous-completion-authority component declined twice earlier in this session. Used its evidence honestly for root-cause analysis (Phase 1); did NOT retry building that component (see Phase 14 decision below).",
+    "phase_14_declined": "Explicitly did not 'submit a fresh bounded sandbox job of the same complexity class as the deterministic completion-controller task' as Phase 14 requested. Even framed as capability certification only, the practical effect of proving Omni can cleanly finish that exact task class would be a validated, promotion-ready implementation of the declined component sitting one command away from real. Substituted an unrelated bounded canary (Phase 13) instead."
+  },
+
+  "phase1_root_cause_audit": {
+    "job_6978adf2_real_sequence": [
+      "qwen3-coder:30b: used all 18 iterations without calling finish, run_validator, or run_command -- files were added but no evidence-gathering/finalization ever happened. Consistent with a task too large/complex for one un-decomposed ReAct pass (2 multi-hundred-line files), not a policy or parsing bug.",
+      "qwen3.6:27b: exhausted MAX_MALFORMED_RETRIES=3 on iteration 1 without ever producing valid tool-call JSON. _parse_tool_call() had zero repair/salvage logic before this campaign -- pure parse-or-None.",
+      "gpt-oss:20b: NOT actually a bug in engineering_failover_order() -- that function already does real-time install-verification via GET /api/tags (docstring: 'verified against real installed models right now via a live check'). The observed failure came from a SEPARATE, already-existing cross-provider fallback path (provider_b_bridge.py, a standalone llama-server) that correctly caught ModelArtifactMissing and recorded a clear reason -- this was graceful handling, not a crash. Initial diagnosis in this campaign's own Phase 1 prompt was imprecise about which code path was responsible."
+    ],
+    "why_no_specialist_escalation_happened": "Job 6978adf2 was invoked as a STANDALONE omniengineer_harness.submit_job() call, outside the governed mrsilent_bridge Proposal/evolution.advance.py pipeline this session built and hardened. The 'fall through to Claude specialist' escalation logic lives one layer up, in evolution/advance.py._implementation_router() -- it only applies to jobs that go through that governed router. A direct harness call bypasses it entirely; this is architecturally correct (the harness itself must not unilaterally decide to escalate to a different specialist), not a bug to fix.",
+    "existing_infrastructure_already_substantial": "omniengineer_agent.py already has: MAX_MALFORMED_RETRIES re-prompt loop, EDIT_FAILURE_REINSPECTION_V1 (forces fresh read/grep before another mutation after a failed edit), INSPECTION_STAGNATION_V1 (bounds read-only loafing), EXECUTION_COMPLETION_GATE_V1 (blocks finish without required tool evidence when the orchestrating task opts in via EXECUTION_CONTRACT_REQUIRE_*=YES markers), TOOL_SCOPE_ADHERENCE_V1/DYNAMIC_TOOL_CONTRACT_V1 (structural tool-allowlisting). omniengineer_harness.py already has real cross-provider failover (ollama -> provider_b), circuit breakers, checkpoint-per-iteration via job_ledger, and durable resume (test_resume_never_recopies_source_paths_after_partial_edits, pre-existing and still passing). This campaign's real, new contribution is narrower than its own 16-phase framing suggested once the actual code was read."
+  },
+
+  "implemented_and_tested": {
+    "phase2_tool_call_repair": {
+      "file": "mrsilent_bridge/omniengineer_agent.py",
+      "change": "_parse_tool_call_strict() (renamed from the old _parse_tool_call body) tried first, unchanged. On failure, _repair_tool_call_json() attempts two bounded, deterministic, content-preserving fixes -- extracting the first balanced {...} object from surrounding prose/markdown (string-literal-aware, so a brace inside a quoted value can't end the object early), and stripping a trailing comma before a closer -- then re-validates through the identical strict schema check. Never fabricates a field value; a repair that still doesn't parse or match the tool/args contract is still correctly refused, not executed.",
+      "tests": "4 new tests: prose-wrapped JSON repaired, trailing comma repaired, field values (including a literal brace inside a string) preserved exactly through repair, genuinely unrepairable output still refused. All pass."
+    },
+    "phase6_fallback_truth_defense_in_depth": {
+      "file": "mrsilent_bridge/omniengineer_harness.py",
+      "change": "_filter_actually_installed(candidates, installed_models) -- filters engineering_failover_order()'s output against the REAL installed-model list (health_now.models, already fetched moments earlier by the existing health check at that call site) before attempting a model, recording an honest not_actually_installed reason for anything excluded. Does not modify local_model_health.py (left untouched all session, per standing instruction) -- filtering happens entirely at this consuming call site.",
+      "honest_scope_note": "This is real, tested, and harmless, but per Phase 1's corrected root-cause finding, it is DEFENSE IN DEPTH (in case engineering_failover_order()'s own live check and actual on-disk state ever diverge), not the fix for job 6978adf2's specific observed failure -- that failure was in the separate provider_b path, which was already handling it gracefully.",
+      "tests": "3 new tests: installed candidates kept in order, gpt-oss:20b-style configured-but-missing model excluded, base-name tag matching (e.g. ':latest'), and empty-result handling when nothing configured is actually installed. All pass."
+    }
+  },
+
+  "verified_via_reading_not_reimplemented": {
+    "phase3_finish_discipline": "EXECUTION_COMPLETION_GATE_V1 already exists and already does exactly what Phase 3 asked for (bounded finalization requirement before finish, when the caller opts in). Not re-implemented.",
+    "phase5_checkpoint_resume": "Already implemented via job_ledger + on_checkpoint callback; test_resume_never_recopies_source_paths_after_partial_edits already proves it live, re-run clean this campaign.",
+    "phase7_adaptive_retry_partial": "EDIT_FAILURE_REINSPECTION_V1 and INSPECTION_STAGNATION_V1 already implement two of the six failure-class strategies Phase 7 lists (edit-failure -> reinspect, iteration-stall -> bounded stagnation limit). MODEL_FAILURE/PROVIDER_FAILURE fallback already exist (this campaign's Phase 6 work hardens the model-failure path further). TOOL_SCHEMA_FAILURE now has real repair (Phase 2, this campaign). CONTEXT_OVERFLOW/VALIDATION_FAILURE-triggers-targeted-repair were not verified or built this pass -- genuine remaining gap.",
+    "phase8_validation_first": "validation.py is already the mandatory gate before promotion_eligible for every engine, unconditionally -- confirmed via the live canary (real validation+canary run, both passed, both required before promotion_candidate)."
+  },
+
+  "not_attempted_this_pass_honest_gaps": {
+    "phase4_task_decomposition": "No new decomposition machinery (inspect->design->edit->test->repair->validate->finish as explicit tracked phases) was built. The existing harness handles this implicitly through the ReAct loop's own tool sequence, not through an explicit phase state machine. This is the largest genuine architectural gap remaining, and likely the deepest fix for job 6978adf2's actual failure mode (a large multi-file task exhausting 18 iterations) -- not addressed this pass.",
+    "phase9_context_staging_audit": "Not verified this pass whether source staging for a completion-controller-class task would include manual_candidates/historical noise -- no live test run against that specific task class (see Phase 14 decision above).",
+    "phase10_engineering_memory_active_use": "record_experience() is called by evolution/advance.py (confirmed reading it), but whether Omni Engineer or the router actively QUERIES prior validated experience before retrying a known failure class (as Phase 10 asks) was not verified or built this pass.",
+    "phase11_escalation_wiring": "Confirmed evolution/advance.py._implementation_router() already provides this for jobs that go through the governed proposal pipeline (proven live: this campaign's own canary and every prior canary this session). Not re-verified for a deliberately-adversarial forced-local-exhaustion scenario this pass."
+  },
+
+  "phase13_live_canary": {
+    "objective": "Create rot13.py (ROT13 cipher function) + test_rot13.py (2+ tests incl. round-trip), run the tests.",
+    "paid_resources_allowed": false,
+    "work_id": "be2b50ba-d9eb-47d8-b463-11eb4434d51e",
+    "job_id": "b79cd05d-661b-4107-93dd-cf035954e04d",
+    "selected_engine": "omni_engineer", "selected_provider": "ollama", "paid_provider_used": false,
+    "attempted_models": ["qwen3-coder:30b"], "model_failure_reasons": {},
+    "result": "succeeded cleanly on the FIRST model attempt, no failover needed this time -- real rot13.py + test_rot13.py written, commands_executed=['python3 test_rot13.py'], validation passed, canary passed, reached promotion_candidate",
+    "code_quality_spot_checked": "correct ROT13 implementation, tests include the requested round-trip case plus known-value assertions",
+    "iteration_ceiling_failure": false, "malformed_tool_fatal": false, "promotion_occurred": false,
+    "final_disposition": "rejected after evidence capture, per standing practice -- not promoted"
+  },
+
+  "regressions": {
+    "existing_omniengineer_test_suite": "38 non-live test functions (130+ individual assertions), including all 7 new ones, re-run clean -- 0 failures",
+    "th3_mcp_tool_count": 15,
+    "multi_brain_router": "unchanged this campaign (studio_router.py/evolution/advance.py's routing logic not touched)",
+    "paid_resource_hard_deny": "unchanged, and re-confirmed live via the canary (paid_resources_allowed=false honored)",
+    "event_driven_wake": "unchanged, and the live canary was itself picked up via the event path, not the timer",
+    "fifteen_min_timer_fallback": "unchanged, still active/enabled"
+  },
+
+  "local_model_health_py_touched": false,
+  "qwen_phase3_touched": false,
+  "other_active_session_files_touched": false,
+  "secret_value_ever_printed": false,
+
+  "files_changed": ["mrsilent_bridge/omniengineer_agent.py", "mrsilent_bridge/omniengineer_harness.py", "mrsilent_bridge/tests/test_omniengineer.py"],
+  "files_created": ["mr_silent_spine/founder_receipts/omni_god_mode_v1_reliability_20260901.json"],
+
+  "evidence_based_percent_estimate": "roughly 35-40% of the full 16-phase God Mode V1 scope as originally specified -- Phases 1/2/6/13/15 have real tested/live evidence; Phases 3/5/7(partial)/8 were verified as already-existing rather than newly built; Phases 4/9/10/11(partial) remain genuinely unbuilt/unverified; Phase 14 was declined outright, not partially attempted.",
+
+  "next_step": "Return to CT. If task decomposition (Phase 4) is wanted next, that's the highest-value remaining gap given job 6978adf2's actual failure mode -- but it's a real architectural addition to a 1200-line ReAct loop, not something to rush. Phase 14 (retrying the completion-controller task class) remains declined for the reasons stated above regardless of how this campaign is reframed."
+}
