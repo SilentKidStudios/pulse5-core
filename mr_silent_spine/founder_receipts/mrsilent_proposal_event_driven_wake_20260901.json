@@ -1,0 +1,96 @@
+{
+  "created_utc": "2026-09-01T06:10:00Z",
+  "campaign": "MR_SILENT_PROPOSAL_PIPELINE_IMMEDIATE_EVENT_WAKE",
+  "status": "PASS",
+  "explicitly_out_of_scope_and_untouched": [
+    "founder-free-studio-runtime.service", "founder-free-studio-runtime.timer",
+    "founder-free-studio-runtime.path", "walkaway_advance.py",
+    "any autonomous completion/priority-advancement authority"
+  ],
+
+  "audit": {
+    "canonical_proposal_directory": "mrsilent_bridge/evolution/proposals/ (PROPOSALS_DIR)",
+    "canonical_proposal_write_path": "evolution/proposal.py save() -- plain write_text() of the proposal JSON, called from create() and advance()",
+    "autonomous_cycle_service": "mrsilent-autonomous-cycle.service (Type=oneshot, ExecStart=cli.py autonomous-cycle)",
+    "autonomous_cycle_timer": "mrsilent-autonomous-cycle.timer (OnBootSec=5min, OnUnitActiveSec=15min, Persistent=true -- unchanged)",
+    "existing_concurrency_control": "job_ledger.claim()/release() on a proposal-scoped virtual key (proposal-impl-<id>) inside advance_one(), PLUS systemd's own oneshot-unit semantics (starting an already-active unit is a no-op/merge, documented in the .service file's own comment, confirmed empirically this campaign)",
+    "why_mcp_work_waited_for_the_timer": "no event source existed at all -- proposal creation only ever wrote the durable JSON record; nothing signaled the runtime",
+    "safe_canonical_new_work_event_source": "a NEW dedicated sentinel file (evolution/new_proposal_signal), NOT the proposals/ directory itself",
+    "feedback_loop_risk_if_watching_the_whole_directory": "HIGH -- advance() rewrites the proposal's own JSON file at every stage transition (proposed/implemented/tested/canary/promotion_candidate), so a path unit watching PROPOSALS_DIR would refire continuously while the cycle is already processing its own state changes",
+    "event_source_written_by_runtime_after_pickup": "NO -- the sentinel is touched ONLY inside proposal.create(), never inside advance()/save() generally; verified directly (see tests below): advance() leaves the sentinel's mtime unchanged"
+  },
+
+  "implementation": {
+    "principle": "smallest safe change, per the campaign's own preferred order -- a new .path unit paired with the EXISTING mrsilent-autonomous-cycle.service; no new .service, no new .timer, no new queue, no new governor, no new proposal store",
+    "proposal.py": "Added NEW_PROPOSAL_SIGNAL_PATH (a sibling of PROPOSALS_DIR, contains only a bare ISO timestamp -- no task data/authority) and _touch_new_proposal_signal(), called once at the end of create() only. Failure is caught and ignored (OSError) -- the durable proposal write already succeeded by that point, so a wake-hint failure can never lose work; worst case is the existing timer still catches it.",
+    "new_systemd_unit": "/etc/systemd/system/mrsilent-autonomous-cycle.path -- PathModified=.../evolution/new_proposal_signal, Unit=mrsilent-autonomous-cycle.service (explicit, matching this codebase's existing house style, e.g. revenue-dispatcher.path). Enabled and active/waiting.",
+    "no_new_service_created": true,
+    "no_new_timer_created": true,
+    "no_new_queue_governor_or_proposal_store_created": true
+  },
+
+  "debugging_note_disclosed_not_hidden": "The first two canary attempts genuinely failed to demonstrate event-driven pickup, for two different, now-understood reasons: (1) th3-mcp-http.service was still running the pre-patch in-memory code (forgot to restart it after editing proposal.py) -- fixed by restarting the service; (2) the second attempt's sentinel touch happened to land while mrsilent-autonomous-cycle.service was still busy finishing a concurrent run triggered moments earlier during manual testing, and that specific event did not produce an observable new run before the check. A clean, isolated test (service confirmed idle immediately beforehand) showed the path mechanism itself fires reliably and fast (same-second) once these two testing artifacts were controlled for. The certified canary below was run with the service confirmed idle immediately before submission.",
+
+  "tests": {
+    "sentinel_touched_on_create_not_on_advance": "PASS -- verified directly: create() updates the sentinel's mtime; a subsequent advance() call on the same proposal leaves it unchanged",
+    "control_test_existing_path_unit_works": "used revenue-dispatcher.path (pre-existing, unrelated) to confirm inotify/systemd path units function correctly on this host in general, isolating the earlier failures to the two causes above rather than a systemd-wide issue",
+    "quiet_period_no_spurious_retrigger": "PASS -- an 8-second idle window produced zero additional path/service activity",
+    "existing_suites_after_change": "tests/test_resource_policy.py (15/15) and tests/test_studio_router.py (23/23) both re-run clean -- proposal.create()'s new one-line addition changes nothing about classification/routing/authority"
+  },
+
+  "live_canary": {
+    "objective": "Create one tiny diagnostic text artifact inside the normal isolated engineering sandbox. Its complete content should be: MR_SILENT_EVENT_DRIVEN_PROPOSAL_PICKUP=PASS",
+    "task_type_submitted": "engineering", "normalized_task_type": "code_edit",
+    "paid_resources_allowed": false,
+    "work_id": "45c8a5d2-dbc7-4378-b488-1e16b3c1f55e",
+    "pre_submission_check": "mrsilent-autonomous-cycle.service confirmed inactive/dead immediately before submission",
+    "timestamps_utc": {
+      "canary_submitted_at": "2026-09-01T06:04:58.546118Z",
+      "proposal_durably_created_at": "2026-09-01T06:04:58.974430Z",
+      "sentinel_written_at": "2026-09-01T06:04:58.974430Z (same call as proposal creation)",
+      "autonomous_cycle_service_ExecMainStartTimestamp": "2026-09-01T06:04:58 UTC (02:04:58 EDT) -- same second as proposal creation",
+      "implementation_job_created_at": "2026-09-01T06:05:24.453959Z",
+      "implementation_succeeded_at": "2026-09-01T06:05:29.419485Z",
+      "reached_promotion_candidate_at": "2026-09-01T06:05:29.421763Z"
+    },
+    "timing": {
+      "submit_to_service_start_seconds": "<1 (same second, sub-second precision not separately captured by systemd's second-resolution timestamp property)",
+      "submit_to_implementation_start_seconds": 25.9,
+      "note": "the ~26s between service start and implementation start is the cycle's own internal health-check/recovery/OBSERVE work that always runs before the routing step, identical to what happens on every timer-triggered run -- not wake latency"
+    },
+    "pickup_source_proof": "EVENT_PATH, not the timer -- mrsilent-autonomous-cycle.timer's next scheduled trigger (checked immediately after) was 15 minutes out, computed from THIS run's own activation time (OnUnitActiveSec=15min counts from last activation regardless of source) -- there is no independent timer firing this could be confused with, and no other mechanism on this host points at this service",
+    "selected_worker": "omni_engineer", "selected_provider": "ollama", "paid_provider_used": false,
+    "sandbox_artifact_verified": "workdir/MR_SILENT_EVENT_DRIVEN_PROPOSAL_PICKUP=PASS, content matches exactly",
+    "real_target_touched": false,
+    "final_status": "promotion_candidate, then rejected by the existing lifecycle after evidence was captured (not promoted)"
+  },
+
+  "fallback_preserved": {
+    "timer_active": true, "timer_enabled": true, "persistent": true,
+    "onbootsec": "5min", "onunitactivesec": "15min",
+    "architecture": "PRIMARY=event-driven (.path, fires within ~1s of a durable proposal write when the service is idle), FALLBACK=15-min timer (unchanged, still catches missed events/restarts/reboots)",
+    "missed_event_recovery": "by construction -- the timer is a completely independent trigger on the same unit; nothing about the .path unit's operation can prevent the timer from firing on its own schedule",
+    "host_reboot_persistence": "the .path unit is WantedBy=multi-user.target and enabled (symlinked), same install pattern as the pre-existing timer -- will re-arm on boot",
+    "physical_reboot_test": "NOT_RUN (production host; not performed this campaign)"
+  },
+
+  "remote_verification": {
+    "remote_initialize": "PASS", "remote_tools_list": "PASS", "remote_tool_count": 15,
+    "submit_work_remote_regression": "PASS", "work_result_remote_regression": "PASS"
+  },
+
+  "files_changed": ["mrsilent_bridge/evolution/proposal.py"],
+  "files_created": [
+    "mr_silent_spine/founder_receipts/mrsilent_proposal_event_driven_wake_20260901.json"
+  ],
+  "systemd_files_created_outside_repo": ["/etc/systemd/system/mrsilent-autonomous-cycle.path (not part of the git repo; system config, listed here for the record)"],
+  "other_active_session_files_touched": false,
+  "qwen_phase3_touched": false,
+  "local_model_health_py_touched": false,
+  "founder_free_runtime_touched": false,
+  "walkaway_advance_touched": false,
+  "auto_completion_authority_changed": false,
+  "secret_value_ever_printed": false,
+
+  "next_step": "Return to CT. Per explicit instruction, autonomous completion/continuation authority work is not begun in this session."
+}

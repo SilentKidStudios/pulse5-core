@@ -62,8 +62,32 @@ class Proposal:
     # defaults its OWN parameter to False instead, at that call site only.
 
 
+# Event-driven pickup wake signal (mrsilent-autonomous-cycle.path watches
+# ONLY this single file, via PathModified=). Deliberately a SIBLING of
+# PROPOSALS_DIR, never inside it, and touched ONLY here in create() -- never
+# in advance()/save(), which run repeatedly during the cycle's OWN
+# processing of an already-existing proposal. That's what keeps this a
+# clean "new work arrived" signal instead of a continuous self-retrigger:
+# watching the whole proposals/ directory would fire on every stage
+# transition the cycle itself makes while already running. Contains no task
+# data/authority -- a bare timestamp only; the existing proposals/ store and
+# job_ledger remain the sole source of truth for what work exists and who
+# gets to decide about it. A failure to write it is caught and ignored: the
+# durable proposal record (save(p), just above) has already succeeded by the
+# time this runs, so a wake-hint failure can never lose or block real work --
+# worst case, the existing 15-minute timer still picks it up.
+NEW_PROPOSAL_SIGNAL_PATH = PROPOSALS_DIR.parent / "new_proposal_signal"
+
+
 def _path(proposal_id: str) -> Path:
     return PROPOSALS_DIR / f"{proposal_id}.json"
+
+
+def _touch_new_proposal_signal(at: str) -> None:
+    try:
+        NEW_PROPOSAL_SIGNAL_PATH.write_text(at)
+    except OSError:
+        pass
 
 
 def create(
@@ -90,6 +114,7 @@ def create(
     )
     p.history.append({"at": p.created_at, "event": "created", "status": p.status})
     save(p)
+    _touch_new_proposal_signal(p.created_at)  # durable write already succeeded above; this is a best-effort wake hint only
     return p
 
 
