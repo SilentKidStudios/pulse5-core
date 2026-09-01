@@ -2,6 +2,7 @@
   "created_utc": "2026-09-01T18:52:00Z",
   "campaign": "OMNI_GOD_MODE_V1_FIRST_POST_CERTIFICATION_MISSION",
   "baseline_commit": "b627d2a",
+  "attempt_commit": "98d739f",
   "status": "OMNI ENGINEER FAILED TO DELIVER A SAFE, USABLE COMPLETION CONTROLLER IN TWO REAL, GENUINE ATTEMPTS. Claude did not implement it. No code was committed to the real repository. This is an honest failure report, not a workaround.",
 
   "role_boundary_respected": "Claude's role this mission was submit/observe/validate/report only, per explicit instruction. Both attempts were submitted through omniengineer_harness.submit_job_decomposed() -- the real, certified OMNI_GOD_MODE_V1 decomposed execution path -- never through Claude's own code-writing. When both attempts produced unsafe or non-functional output, Claude did NOT rewrite or complete the implementation itself; this receipt reports the exact failures instead, per the mission's explicit instruction: 'If Omni fails, preserve its evidence and report the exact failure; do not silently take over implementation yourself.'",
