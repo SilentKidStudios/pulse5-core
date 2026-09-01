@@ -1,0 +1,65 @@
+{
+  "created_utc": "2026-09-01T19:35:00Z",
+  "campaign": "COMPLETION_CONTROLLER_MICRO_JOB_1F_ONE_SOURCE_FILE_PER_JOB",
+  "baseline_commit": "fdef798",
+  "status": "MICRO_JOB_1F_A = FAIL, after both a local Omni attempt and one canonical escalation attempt. Per this campaign's explicit rule ('If any sub-job still fails after one canonical escalation attempt: STOP. Do not retry/rephrase again.'), this stops here. Jobs 1F-B/C/D were never started (each requires the prior one to PASS).",
+
+  "role_boundary_respected": "Claude did not write, invent, or manually repair any API-contract content. The local Omni attempt was submitted through the real omniengineer_harness.submit_job() path. The escalation candidate was selected by actually calling the real, canonical studio_router.select() function (not assumed), which correctly excluded the metered claude_code_engineer_v1 under paid_resources_allowed=false and selected the one real, free, already-registered eligible candidate (local_model_engineer_v1). The escalation call embedded the REAL, verbatim source file text so that any correct output would be genuine analysis, not fabrication -- and the model's own output was rejected as not satisfying the task, not silently accepted or repaired.",
+
+  "boundary_respected": "No reference file was modified. No manual_candidates use. No production promotion, no paid resources (local_model_engineer_v1 is cost_class=free, confirmed from the live registry), no live unattended trigger touched, no credential/protected-gate changes.",
+
+  "local_omni_attempt": {
+    "job_id": "8255ec36-9003-4104-8d75-e8330fe8c890",
+    "requested_by": "omni_god_mode_v1_completion_controller_microjob1f_a",
+    "task_structure": "single source file (completion_verifier.py only), read exactly once, then immediately write_file_sandbox with the full contract, then finish -- specifically designed to remove the multi-file read-streak this campaign's own diagnosis identified as the likely failure trigger",
+    "status": "error (all 3 real installed models attempted: qwen3-coder:30b used all 8 iterations without calling finish or escalate; qwen3.6:27b failed to produce a valid tool call after 3 attempts; gpt-oss:20b unavailable -- real infra, no local Ollama manifest, same root cause documented in the earlier provider_b investigation)",
+    "artifact_produced": "a file WAS created, but under the WRONG filename (completion_verifier_contract.json instead of the required contract_completion_verifier.json), and its content is truncated/invalid JSON: exactly `{\"name\": \"completion_verifier\",` and nothing more -- confirmed by reading the file directly.",
+    "verdict": "FAIL -- wrong filename, invalid JSON, overall job status=error"
+  },
+
+  "canonical_escalation_attempt": {
+    "selection_method": "studio_router.select('analysis', allow_founder_gated=False, allow_paid=False) -- run for real, not assumed",
+    "selection_result": "local_model_engineer_v1 (adapter=local_model) -- the only eligible candidate; claude_code_engineer_v1 was correctly excluded with reason 'paid resource excluded by policy (paid_resources_allowed=false)'. This is a genuinely free (cost_class=free, local Ollama inference), already-registered, already-permitted capability -- not a new resource enabled for this purpose.",
+    "job_id": "d64c404d-2ba9-4e1e-bccd-8aa6bb53dc79",
+    "mechanism": "local_model_bridge.submit_job() -- a single prompt-to-completion call (this capability has no file-editing tool-use loop, per its own registry entry), with the full, real, verbatim text of completion_verifier.py embedded directly in the prompt, plus the exact same field-by-field extraction instructions given to the local Omni attempt.",
+    "status": "succeeded (the job itself completed without technical error)",
+    "actual_response_content": "{\"error\": \"usage: completion_verifier.py <item_id> | --all\"}",
+    "why_this_is_a_failure": "This is not a genuine analysis result. It is the EXACT literal text completion_verifier.py's own main() function prints when the real script is executed with no command-line arguments (confirmed: this exact string appears in the source at completion_verifier.py's main() function). The model did not extract facts from the source text it was given -- it appears to have simulated 'running' the script as a CLI tool with no arguments instead of analyzing it as a text-extraction task, producing output that is real (drawn from real source content) but is completely unresponsive to the actual request and contains none of the required contract fields.",
+    "verdict": "FAIL -- did not perform the requested extraction task"
+  },
+
+  "per_campaign_rule": "Per this campaign's explicit instruction ('If any sub-job still fails after one canonical escalation attempt: STOP. Do not retry/rephrase again. Return to CT with the exact failed source/job and engine evidence.'), this stops here without rephrasing the escalation prompt or attempting a second escalation.",
+
+  "final_report": {
+    "MICRO_JOB_1F_A": "FAIL",
+    "MICRO_JOB_1F_A_ENGINE": "omni_engineer_v1 (local attempt, failed) -> local_model_engineer_v1 (canonical escalation, also failed)",
+    "MICRO_JOB_1F_A_JOB_ID": "8255ec36-9003-4104-8d75-e8330fe8c890 (local Omni), d64c404d-2ba9-4e1e-bccd-8aa6bb53dc79 (escalation)",
+    "MICRO_JOB_1F_B": "NOT_STARTED (gated on 1F-A)",
+    "MICRO_JOB_1F_C": "NOT_STARTED",
+    "MICRO_JOB_1F_D": "NOT_STARTED",
+    "ALL_4_SOURCE_FILES_READ": "N/A -- only 1 of 4 attempted (job structure is one-file-at-a-time; 1F-A alone did not pass)",
+    "ALL_4_ARTIFACTS_WRITTEN": false,
+    "NO_HALLUCINATED_API": "PASS in the narrow sense -- no function/type name was invented in either attempt (the local attempt's fragment named nothing; the escalation's response also names nothing from the real API surface, it just echoes an unrelated real string)",
+    "NO_REFERENCE_FILE_MODIFIED": "PASS -- confirmed in both attempts",
+    "NO_MOCK_IMPLEMENTATION": "PASS -- no implementation was attempted in either case",
+    "NO_CONTROLLER_IMPLEMENTATION": "PASS",
+    "DETERMINISTIC_MERGE": "NOT_ATTEMPTED -- gated on all 4 sub-jobs passing",
+    "FINAL_CONTRACT_FILE": "does not exist",
+    "FINAL_CONTRACT_JSON_VALID": "N/A"
+  },
+
+  "files_changed": [],
+  "files_created": ["mr_silent_spine/founder_receipts/omni_god_mode_v1_completion_controller_microjob1f_a_20260901.json"],
+  "note_on_scope": "No repository code was changed. No valid API contract artifact exists yet for any of the 4 source files.",
+
+  "diagnostic_note": "This is a genuinely new and different failure signature from anything seen in Micro-Jobs 1/1C/1D/1E. The single-file restructuring DID appear to change local Omni's behavior (a file was created this time, where 4-file attempts either produced nothing or the wrong content) -- but a NEW problem surfaced: apparent tool-call formatting/truncation issues mid-write, and total model exhaustion across all 3 locally installed models. The canonical escalation, while correctly free/local/real, revealed a DIFFERENT capability gap: local_model_engineer_v1's single-shot completion mode (no tool-use loop, no iterative refinement, no structural JSON enforcement) appears prone to a distinct failure mode -- pattern-matching onto a plausible-but-irrelevant response (simulating command output) rather than performing free-form text extraction from a large embedded document. Neither failure mode involved fabrication of a nonexistent API or unsafe action.",
+
+  "remaining_gaps": [
+    "A correct, complete contract_completion_verifier.json still does not exist.",
+    "Local Omni: the single-file restructuring helped (an artifact was attempted) but introduced or exposed a new truncation/tool-call-formatting failure under this exact model/task combination.",
+    "Canonical escalation (local_model_engineer_v1): capable of running and returning free, local output, but its single-shot completion mode did not perform the requested extraction correctly on this attempt.",
+    "No further local reformulation or escalation rephrasing was attempted, per explicit instruction."
+  ],
+
+  "next_step": "Return to CT with this exact Micro-Job 1F-A failure (both the local attempt and its one canonical escalation attempt), per the explicit instruction not to retry or rephrase further. CT's decision needed: retry the escalation once with response_format/json_schema-style grammar constraints (this project's own provider_b_bridge.py already demonstrates that unconstrained local-model prompting is measurably less reliable than schema-constrained decoding for structured JSON output -- local_model_bridge.py's submit_job() may or may not support an equivalent constraint; that would need to be checked before use), route this one narrow extraction to a human, or reconsider whether this exact micro-job's shape (very large embedded source text in a single completion) is asking too much of any currently eligible free/local engine at once."
+}
