@@ -5,6 +5,7 @@
   "phase2_base_commit": "abfd80e",
   "phase2_ledger_fix_commit": "6c0749f",
   "phase2_reconciliation_commit": "5cfb145",
+  "phase3_commit": "a487740",
   "status": "PARTIAL -- real, tested, live-proven router integration and phase-narrative-accuracy fix; two disclosed, deliberate gaps remain (see remaining_god_mode_v1_gaps), per this campaign's own instruction not to report 100% without real evidence",
 
   "boundary_respected": "The autonomous completion-controller (mr_silent_spine/walkaway_governance/, AUTO_COMPLETION_AUTHORITY, the reference historical job 6978adf2) was NOT implemented, retried, or promoted this session. That historical job's task text was read ONCE, purely to calibrate classify_complexity()'s thresholds against a real example of the SHAPE (length, PHASE N markers, multiple named files, multiple stage keywords) of a genuinely complex task -- the classifier was then tested against an entirely separate synthetic fixture, never that job's own content. mrsilent_bridge/manual_candidates/ was read only to design and test the context-staging exclusion filter (which excludes it) -- never used as runtime source_paths.",
