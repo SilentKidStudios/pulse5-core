@@ -66,7 +66,7 @@
   "11_interruption_resume_test": "See section 2 above -- proven via a durable-state read between phases, not a literal process kill (per campaign instruction not to destabilize the live runtime).",
 
   "12_full_regression": {
-    "test_omniengineer_suite": "45 non-live test functions (7 new decomposition tests + all prior), 0 failures",
+    "test_omniengineer_suite": "46 non-live test functions as of the followup_ledger_fix commit (8 new decomposition/ledger tests + all prior), 0 failures -- was 45 at this receipt's original close",
     "th3_mcp_tool_count": 15, "event_driven_wake": "unaffected (unrelated files)", "timer_fallback": "unaffected",
     "paid_resource_policy": "unaffected (studio_router.py/advance.py not touched this campaign)",
     "no_manual_candidate_runtime_use": "true for the decomposed path -- it has no source_paths support at all yet, so it structurally cannot pull from manual_candidates/"
@@ -84,7 +84,8 @@
     "MULTI_MODEL_FAILOVER": "PROVEN, now also within a phase (this pass)",
     "MULTI_PROVIDER_FAILOVER": "unchanged, pre-existing, real (provider_b), not extended into phases this pass",
     "CANONICAL_ESCALATION": "PROVEN at the whole-job/router layer (prior session); NOT yet wired for submit_job_decomposed()",
-    "COMPLEX_JOB_AUTONOMOUS_EXECUTION": "PROVEN live this pass -- a genuinely multi-file, multi-phase objective completed with zero Founder prompting, correct code, passing tests, real validation gate"
+    "COMPLEX_JOB_AUTONOMOUS_EXECUTION": "PROVEN live this pass -- a genuinely multi-file, multi-phase objective completed with zero Founder prompting, correct code, passing tests, real validation gate",
+    "DURABLE_LEDGER_OBSERVABILITY": "FIXED via followup commit 6c0749f -- files_touched/promotion_eligible now correctly persisted to the durable ledger record on every decomposed-job finalization path, not just the in-memory JobResult. The separate phase-narrative-accuracy gap (section 3) remains open."
   },
 
   "regressions": {"protected_gates": "unaffected (authority_policy.py/promotion.py untouched)", "paid_resource_hard_deny": "unaffected", "th3_mcp_tool_count": 15},
@@ -98,5 +99,22 @@
   "local_model_health_py_touched": false,
   "secret_value_ever_printed": false,
 
-  "next_step": "If wanted next: (a) wire submit_job_decomposed() into evolution/advance.py's _implementation_router so it's reachable through the governed TH3 submit_work path, not just direct calls -- real integration work, not yet done; (b) add source_paths support to the decomposed path for true multi-file inspection of existing canonical source; (c) fix phase-record accuracy so an earlier failover model's real completed work isn't overwritten by a later model's outright failure in the same phase's recorded summary. None of this touches the completion-controller topic, which remains untouched and declined."
+  "next_step": "If wanted next: (a) wire submit_job_decomposed() into evolution/advance.py's _implementation_router so it's reachable through the governed TH3 submit_work path, not just direct calls -- real integration work, not yet done; (b) add source_paths support to the decomposed path for true multi-file inspection of existing canonical source; (c) fix phase-RECORD narrative accuracy so an earlier failover model's real completed work isn't overwritten by a later model's outright failure in the same phase's recorded summary/final_action (distinct from, and NOT fixed by, the followup_ledger_fix below -- see that section). None of this touches the completion-controller topic, which remains untouched and declined.",
+
+  "followup_reconciliation_20260901T1500Z": {
+    "trigger": "User asked to check work_result on job c58b593b (the complexity-class certification job_id). work_result correctly returned found=false -- that job was a direct submit_job_decomposed() call, never routed through submit_work/the Proposal pipeline (expected, matches the disclosed router-integration gap above). Checking the real job_ledger record directly as a follow-up then surfaced a genuine defect, not the expected result.",
+    "defect_found": "job_ledger.load(job_id) showed promotion_eligible=False and files_touched={} for job c58b593b, even though its own returned JobResult had correctly reported promotion_eligible=True with three real added files (inventory.py, pricing.py, test_inventory.py). Root cause: all three job_ledger.checkpoint() calls that finalize a decomposed job (success, and both escalation paths) computed files_touched/promotion_eligible correctly for the in-memory JobResult but never passed them as updates to checkpoint() itself, so the DURABLE record never received them.",
+    "fix_commit": "6c0749f",
+    "fix_scope": "All three finalizing checkpoint() call sites in submit_job_decomposed() (success path, and the two escalation paths -- initial-phases and mid-repair) now pass files_touched=/promotion_eligible= (and, for the mid-repair escalation path, validation_result= as well, which had the same omission).",
+    "new_regression_test": "test_decomposed_ledger_record_carries_real_files_touched_and_promotion_eligible -- mocks run_agent_loop to actually write a real file (not just claim success), then asserts the DURABLE ledger record (job_ledger.load(), not the returned JobResult) reflects both fields correctly. This is the kind of test that would have caught the original defect.",
+    "distinct_from_the_iteration_stall_observability_gap": "This ledger-persistence defect is DIFFERENT from, and not fixed by, the 'phase records can undersell real progress' finding in section 3 above (an earlier failover model's real work getting overwritten by a later model's failure in the phase's own summary/final_action). That narrative-accuracy gap remains open. This fix only ensures the FINAL job-level files_touched/promotion_eligible fields are durably correct -- which they now are, verified live on c58b593b after a manual ledger check (not yet re-run through the fixed code, since c58b593b already completed before the fix -- the fix is proven by the new unit test and by re-running the full suite, not by mutating that historical job's own ledger record retroactively)."
+  },
+
+  "reconciliation_verification_20260901T1510Z": {
+    "commits_verified_present_on_branch": ["abfd80e", "6c0749f"],
+    "full_suite_rerun": "46/46 PASS, 0 regressions",
+    "durable_ledger_regression_isolated_rerun": "PASS",
+    "no_new_engineering_performed": true,
+    "receipt_updated_not_replaced": true
+  }
 }
