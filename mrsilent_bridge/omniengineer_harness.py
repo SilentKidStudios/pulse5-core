@@ -1656,55 +1656,15 @@ def _run_phase(
 
 
 # ---- SOURCE_PATH / CONTEXT STAGING for decomposed jobs (Phase 3) ----------
-# GATED_PATH_MARKERS (authority_policy.py) already blocks a job from ever
-# reaching credential/protected paths at all (FOUNDER_GATED). This is a
-# SEPARATE, complementary hygiene filter: even an authority-safe path can be
-# noisy, historical, or irrelevant context that should never be silently
-# staged into a bounded phase's prompt just because a caller's source_paths
-# list happened to include it. Default-exclude; live canonical source wins
-# over historical copies.
-CONTEXT_STAGING_DEFAULT_EXCLUDED_MARKERS = (
-    "manual_candidates",
-    "continuity_backup",
-    "/backups/",
-    "_backup/",
-    "archived_jobs",
-    "archive/",  # generic archive trees, distinct from archived_jobs above
-    "founder_receipts",
-    "content_packet",
-    "/logs/",
-    ".log",
-    "/jobs/",  # another job's own historical workdir tree
-    # GOD_MODE_V1 FINAL GAP CLOSURE: defense-in-depth secret/key exclusion.
-    # authority_policy.GATED_PATH_MARKERS already REJECTS the whole job
-    # outright (a stronger guarantee) if a source_path touches one of these
-    # -- this list ensures the STAGING layer itself never copies such a
-    # path either, in case a future caller reaches this filter through a
-    # path that does not also run classify() first.
-    "secrets",
-    "credentials",
-    ".env",
-    "/.ssh",
-    "/.aws",
-    "/.config/gcloud",
+# GOVERNED CANONICAL SOURCE STAGING REPAIR: this filter now lives in the
+# shared context_staging.py module so bridge.py (Claude Code) reuses the
+# exact same exclusion list/logic instead of a second, driftable copy.
+# Names kept here as aliases -- zero change to any existing internal call
+# site or test in this file.
+from context_staging import (  # noqa: E402
+    CONTEXT_STAGING_DEFAULT_EXCLUDED_MARKERS,
+    stage_context_source_paths as _stage_context_source_paths,
 )
-
-
-def _stage_context_source_paths(source_paths: list[Path]) -> tuple[list[Path], list[dict[str, str]]]:
-    """Splits caller-provided source_paths into (allowed, excluded) per the
-    default-exclusion markers above. Returns the excluded list with its
-    matched marker for durable, honest recording -- callers never silently
-    lose a path without a reason on record."""
-    allowed: list[Path] = []
-    excluded: list[dict[str, str]] = []
-    for p in source_paths:
-        p_str = str(p)
-        marker = next((m for m in CONTEXT_STAGING_DEFAULT_EXCLUDED_MARKERS if m.lower() in p_str.lower()), None)
-        if marker:
-            excluded.append({"path": p_str, "excluded_marker": marker})
-        else:
-            allowed.append(p)
-    return allowed, excluded
 
 
 def submit_job_decomposed(

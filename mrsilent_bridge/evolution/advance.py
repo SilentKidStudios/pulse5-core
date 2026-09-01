@@ -93,18 +93,20 @@ Why this is safe to run unattended for low-risk proposals:
   - eligibility requires risk_score == "low" AND status in {observed, proposed}
     — anything else (medium/founder_gated, or already past this pipeline)
     is left alone
-  - SAFE SANDBOX IMPLEMENT never passes source_paths to bridge.submit_job
-    (Claude Code) at all -- that engine's implementing job can only ever
-    create NEW files in a fresh empty sandbox, structurally. For
-    omni_engineer_v1, source_paths is threaded from the proposal's OWN
-    p.source_paths field (GOD_MODE_V1 FINAL GAP CLOSURE) -- defaults to []
-    for every existing/automatic proposal (identical empty-sandbox
+  - SAFE SANDBOX IMPLEMENT: at BOTH engines (_run_claude_code and
+    _run_omni_engineer), source_paths is threaded from the proposal's OWN
+    p.source_paths field (GOD_MODE_V1 FINAL GAP CLOSURE, extended to
+    Claude Code by the GOVERNED CANONICAL SOURCE STAGING REPAIR) -- defaults
+    to [] for every existing/automatic proposal (identical empty-sandbox
     behavior, unchanged), and only ever carries real paths when a caller
     EXPLICITLY authorizes them on the proposal itself; still GOVERNED by
-    the same authority_policy.GATED_PATH_MARKERS check and the
-    context-staging default-exclusion filter as a direct submit_job_decomposed()
-    call. "No recursive self-modification" therefore still holds by
-    construction for every proposal that does not explicitly opt in.
+    the same authority_policy.GATED_PATH_MARKERS check and the SAME shared
+    context_staging.py default-exclusion filter at both engines (bridge.py
+    and omniengineer_harness.py each apply it independently, so neither
+    engine can be reached with a noisy/historical/secret-adjacent path even
+    if the other engine's own filtering were ever bypassed). "No recursive
+    self-modification" therefore still holds by construction for every
+    proposal that does not explicitly opt in.
   - every implementing job, at every engine, still goes through
     authority_policy.classify() same as any other — a rejected_policy
     outcome is TERMINAL (deterministic across engines, never routed around).
@@ -472,8 +474,18 @@ def _run_omni_engineer(task_text: str, requested_by: str, proposal_id: str) -> t
 
 
 def _run_claude_code(task_text: str, requested_by: str, proposal_id: str) -> tuple[EngineAttempt, Any]:
+    # GOVERNED CANONICAL SOURCE STAGING REPAIR: source_paths is now threaded
+    # from the proposal itself (p.source_paths), the exact same mechanism
+    # _run_omni_engineer() already uses -- re-reads the proposal (a cheap,
+    # isolated disk read) rather than widening the shared 3-arg
+    # _ENGINE_RUNNERS signature. p.source_paths defaults to [] for every
+    # existing/automatic proposal, so this is a no-op unless a caller
+    # explicitly authorized specific real paths on the proposal itself.
+    # bridge.submit_job()'s own context-staging filter (shared with
+    # omniengineer_harness.py via context_staging.py) still applies.
+    p = proposal_mod.load(proposal_id)
     job = bridge.submit_job(
-        task=task_text, requested_by=requested_by, tools=IMPLEMENT_TOOLS, source_paths=None,
+        task=task_text, requested_by=requested_by, tools=IMPLEMENT_TOOLS, source_paths=p.source_paths or None,
         timeout_s=IMPLEMENT_TIMEOUT_S, founder_approved=False,
         on_job_created=lambda jid: proposal_mod.append_implementation_job(
             proposal_id, jid, engine="claude_code", note="job created (linked before execution)"),
