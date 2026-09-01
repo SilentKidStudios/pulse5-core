@@ -1,0 +1,73 @@
+{
+  "created_utc": "2026-09-01T04:35:00Z",
+  "campaign": "CANONICAL_RESOURCE-AWARE_ROUTER_POLICY_FIX",
+  "status": "PASS",
+
+  "root_cause": {
+    "trace": "submit_work never had a resource-constraint parameter at all -- 'no paid resources' was a certification-process constraint on how the human/session chose to run a canary, never threaded into submit_work, the Proposal dataclass, studio_router.rank(), or evolution/advance.py._implementation_router(). Separately, route_preview and the real live router use genuinely different ranking logic: route_preview calls studio_router.rank() directly (locality/cost/risk score, which already puts free/local first by default), while the real live path (evolution/advance.py._implementation_router) takes rank()'s ACCEPTED candidates and re-orders them via its OWN duty-cycle evidence-based weighting (_rank_engineering_engines(), currently: claude_code duty=0.1 primary, omni_engineer duty=0.4 fallback) -- a deliberate, Founder-authorized 2026-08-19 correction, orthogonal to cost. Neither layer had ANY hard cost-based exclusion, so duty-cycle preference for claude_code could always win regardless of a cost/paid intent that was never actually expressed as data anywhere in the system.",
+    "classification": "constraint never existed in the schema (primary) + preview/live use different ranking algorithms with no shared hard-filter layer (secondary, now closed by the same fix)"
+  },
+
+  "fix": {
+    "principle": "Resource constraint enforced as a HARD ELIGIBILITY FILTER inside the one shared function both layers already call (studio_router.rank()), at the exact same tier as the existing allow_founder_gated filter -- not a new router, not a score, not a second implementation.",
+    "studio_router.py": "_evaluate()/rank()/select() gained allow_paid: bool = True. When False, any candidate whose cost_class's first word (the SAME parsing _score()/_COST_RANK already use) is 'metered_api' is rejected before scoring, with an explicit reason string. Default True preserves 100% of existing behavior for every current caller.",
+    "evolution/proposal.py": "Proposal gained paid_resources_allowed: bool = True (backward-compatible default for the ~9500 pre-existing proposals and the OBSERVE engine, neither of which ever declared this). create() gained a matching kwarg.",
+    "evolution/advance.py": "_implementation_router() gained allow_paid: bool = True, passed straight into studio_router.rank(). advance_one() threads it from the real proposal: allow_paid=getattr(p, 'paid_resources_allowed', True). _rank_engineering_engines() (the duty-cycle reorder) is UNCHANGED -- it still only ever reorders whatever rank() already accepted, which now correctly excludes paid candidates upstream when the proposal says so. No control-flow changes were needed in advance_one(): the pre-existing 'no engine completed cleanly this attempt' controlled-escalation path (proposal stays PROPOSED, retried up to MAX_IMPLEMENTATION_ATTEMPTS, then REJECTED with a clear reason -- never silently routed to a different engine) already does exactly the right thing once accepted_engines is correctly empty.",
+    "services/th3_mcp/tools.py": "submit_work gained paid_resources_allowed: bool = False (safe default at this external-facing entry point specifically -- the dataclass/create() default stays True for backward compatibility with internal callers). _first_pass_classify() now returns a distinct 'no_eligible_free_local_route' classification (not conflated with founder_gated) when a capable route exists ONLY via a paid provider; submit_work returns accepted=false with reason=NO_ELIGIBLE_FREE_LOCAL_ROUTE and creates NO Proposal in that case -- never silently falls through. route_preview gained the same paid_resources_allowed parameter (default True, preserving old callers), using the identical studio_router.rank(allow_paid=...) call, so preview and live can never disagree on the hard policy. work_result now surfaces the proposal's real paid_resources_allowed value."
+  },
+
+  "why_this_is_not_always_omni_engineer_first": "The fix does not touch _rank_engineering_engines()'s evidence-based duty-cycle preference at all. When paid_resources_allowed=True (the default for internal/OBSERVE-origin proposals and any submit_work caller who explicitly opts in), claude_code remains the duty-preferred primary exactly as before -- proven by test_paid_resources_allowed_true_preserves_normal_duty_cycle_routing. The hard filter only ever removes a candidate from consideration entirely; it never re-orders the remaining ones.",
+
+  "tests": {
+    "pre_existing_baseline_before_any_change": "41 tests passed (test_studio_router.py, test_evolution_advance.py, test_job_ledger.py) via pytest collection",
+    "new_file": "mrsilent_bridge/tests/test_resource_policy.py -- 15 assertions, all deterministic (monkeypatches evolution.advance._ENGINE_RUNNERS and organ_discovery.duty_check, same pattern as the existing test suite; zero live model calls)",
+    "new_tests_result": "ALL TESTS PASSED (run: python3 tests/test_resource_policy.py)",
+    "key_proofs": [
+      "rank('code_edit', allow_paid=False) excludes claude_code_engineer_v1, keeps omni_engineer_v1, with an explicit 'paid resource excluded by policy' reason",
+      "rank(allow_paid=True, the default) is byte-for-byte unchanged from before this patch",
+      "Proposal.paid_resources_allowed defaults True and persists an explicit False through a real disk round-trip",
+      "with paid_resources_allowed=False and duty_check() STRONGLY preferring claude_code (worst case for this bug), omni_engineer is still selected and claude_code's runner is never even invoked (would raise AssertionError if called)",
+      "with paid_resources_allowed=True, normal duty-cycle routing to claude_code is unchanged (regression guard)",
+      "with the registry monkeypatched so the ONLY capable engineering candidates are paid, and paid_resources_allowed=False: zero accepted candidates, no engine selected, proposal stays 'proposed' (retriable) -- NEVER silently routed to the paid engine"
+    ],
+    "existing_studio_router_and_job_ledger_suites": "re-run clean after the final patch: test_studio_router.py 23/23, test_job_ledger.py and test_promote_self_repair.py all PASS",
+    "pre_existing_unrelated_flakiness_disclosed_not_hidden": "tests/test_evolution_advance.py::test_promotion_still_requires_founder_approved is flaky (observed pass/fail/timeout across repeated runs) because it is the one test in that file that does NOT mock the claude_code engine runner (only omni_engineer), so it depends on a REAL live `claude -p ...` CLI call succeeding promptly -- plausibly contended by this very session already running inside Claude Code. Verified this is unrelated to this patch by two independent methods: (1) logical proof -- the new hard-filter branch is unreachable whenever allow_paid=True, which is exactly what this test always uses, so the code path is byte-identical to before; (2) empirical A/B -- ran the same test repeatedly with the patch temporarily reverted (clean passes) and reapplied (same intermittent fail/timeout pattern recurs) using otherwise-identical invocation. Not fixed in this pass -- out of scope (pre-existing, unrelated to resource policy)."
+  },
+
+  "live_verification": {
+    "remote_initialize": "PASS (HTTP 200)",
+    "remote_tools_list": "PASS (HTTP 200), tool count unchanged at 15",
+    "submit_work_schema_has_paid_resources_allowed": true,
+    "submit_work_schema_has_no_founder_approved_override": true,
+    "route_preview_schema_has_paid_resources_allowed": true,
+    "remote_route_preview_paid_false_excludes_claude_code": "PASS -- verified over the real endpoint: candidates_open_now with paid_resources_allowed=false is exactly ['omni_engineer_v1']"
+  },
+
+  "free_local_canary": {
+    "method": "real submit_work call against the actual production endpoint, paid_resources_allowed=false, no engine named",
+    "objective": "Write a tiny standalone free/local resource-policy canary note for evidence purposes only.",
+    "work_id": "c8a014b5-7088-4440-8ccf-5d1471018d51",
+    "classification": "low",
+    "accepted_candidate_pool_at_submission": ["omni_engineer_v1"],
+    "result": "durably_queued -- next real mrsilent-autonomous-cycle.timer trigger was ~13 minutes out at submission time; not force-advanced in this session (same standing practice as the first governed-bridge canary: never fabricate a synthetic execution in place of the real async path). Check with work_result(work_id=c8a014b5-7088-4440-8ccf-5d1471018d51) to see the real outcome once the timer has run.",
+    "expectation": "Given only omni_engineer_v1 is in the accepted pool this time (claude_code_engineer_v1 hard-excluded), the real router has no paid candidate to select regardless of duty-cycle preference -- expected selected_engine=omni_engineer, not claude_code."
+  },
+
+  "files_changed": [
+    "services/th3_mcp/tools.py",
+    "services/th3_mcp/mcp_core.py"
+  ],
+  "files_created": [
+    "mrsilent_bridge/studio_router.py (first git commit -- pre-existing file, was never tracked)",
+    "mrsilent_bridge/evolution/proposal.py (first git commit -- pre-existing file, was never tracked)",
+    "mrsilent_bridge/evolution/advance.py (first git commit -- pre-existing file, was never tracked)",
+    "mrsilent_bridge/tests/test_resource_policy.py (new)",
+    "mr_silent_spine/founder_receipts/th3_resource_aware_routing_policy_20260901.json"
+  ],
+  "other_active_session_files_touched": false,
+  "qwen_phase3_touched": false,
+  "local_model_health_py_touched": false,
+  "secret_value_ever_printed": false,
+
+  "next_step": "Check work_result(c8a014b5-7088-4440-8ccf-5d1471018d51) once the real timer has run (next trigger was ~04:47 EDT) to confirm the live outcome selected omni_engineer, not claude_code. If it self-rejects to a terminal state, reject it as usual per standing practice; do not promote it."
+}

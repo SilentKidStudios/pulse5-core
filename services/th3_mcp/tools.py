@@ -300,17 +300,24 @@ def active_work(limit: int = 20) -> dict:
     }
 
 
-def route_preview(task_type: str, task_description: str = "", requested_tools: list | None = None) -> dict:
+def route_preview(task_type: str, task_description: str = "", requested_tools: list | None = None, paid_resources_allowed: bool = True) -> dict:
     """PURE DRY RUN. Shows how studio_router would rank candidates for
     task_type (studio_router.rank() is documented as side-effect-free -- no
     job, audit entry, or capability-gap record is created here) plus which
     authority_policy gating constants the task description/tools would trip.
     This is a preview using the same gating constants classify() uses, not a
     literal classify() call (that requires a real job sandbox to mean
-    anything) -- never presented as a guaranteed final verdict."""
+    anything) -- never presented as a guaranteed final verdict.
+
+    paid_resources_allowed is the SAME hard eligibility filter submit_work
+    uses (studio_router.rank(allow_paid=...)) -- when False, a metered/paid
+    candidate never appears as accepted here either, so this preview and the
+    real live router can never disagree on the hard policy, only on
+    duty-cycle/health-based ordering among whatever remains eligible (which
+    can legitimately shift between calls)."""
     requested_tools = set(requested_tools or [])
-    open_evals = studio_router.rank(task_type, allow_founder_gated=False)
-    all_evals = studio_router.rank(task_type, allow_founder_gated=True)
+    open_evals = studio_router.rank(task_type, allow_founder_gated=False, allow_paid=paid_resources_allowed)
+    all_evals = studio_router.rank(task_type, allow_founder_gated=True, allow_paid=paid_resources_allowed)
 
     open_accepted_ids = {e.capability_id for e in open_evals if e.accepted}
     all_accepted = [e for e in all_evals if e.accepted]
@@ -326,17 +333,26 @@ def route_preview(task_type: str, task_description: str = "", requested_tools: l
         proposed = None
         founder_approval_would_unlock_a_candidate = None  # true capability gap, not an approval question
 
+    no_eligible_free_local_route = False
+    if proposed is None and not paid_resources_allowed:
+        # Distinguish "genuinely no capability for this task_type" from
+        # "capability exists, but only via a paid provider policy excludes".
+        unrestricted = studio_router.rank(task_type, allow_founder_gated=True, allow_paid=True)
+        no_eligible_free_local_route = any(e.accepted for e in unrestricted)
+
     gated_tools_hit = sorted(requested_tools & authority_policy.GATED_TOOLS)
     keyword_hits = sorted({p.pattern for p in authority_policy.GATED_KEYWORDS if p.search(task_description or "")})
 
     return {
         "dry_run": True,
         "task_type": task_type,
+        "paid_resources_allowed": paid_resources_allowed,
         "candidates_open_now": [asdict(e) for e in open_evals],
         "candidates_if_founder_approved": [asdict(e) for e in all_evals],
         "proposed_capability_id": proposed.capability_id if proposed else None,
         "proposed_reason": proposed.reason if proposed else "no eligible capability for this task_type (capability gap)",
         "capability_gap": proposed is None,
+        "no_eligible_free_local_route": no_eligible_free_local_route,
         "founder_approval_would_unlock_a_candidate": founder_approval_would_unlock_a_candidate,
         "gated_tools_requested": gated_tools_hit,
         "task_description_matched_gated_keywords": keyword_hits,
@@ -468,7 +484,7 @@ def continuum_status() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _first_pass_classify(objective: str, task_type: str, context: str, requested_capabilities: list[str]) -> tuple[str, list[str]]:
+def _first_pass_classify(objective: str, task_type: str, context: str, requested_capabilities: list[str], paid_resources_allowed: bool) -> tuple[str, list[str]]:
     """Conservative, defense-in-depth first-pass risk_score for a submit_work
     request, using the SAME gating constants authority_policy.classify() uses
     (not a substitute for it -- the real execution engines independently
@@ -476,7 +492,13 @@ def _first_pass_classify(objective: str, task_type: str, context: str, requested
     only decides whether the proposal is even ELIGIBLE for the existing
     auto-advance timer to look at). Defaults to founder_gated whenever
     anything is ambiguous, per 'default deny if classification cannot be
-    established safely.'"""
+    established safely.'
+
+    paid_resources_allowed is a HARD eligibility filter (studio_router.rank(
+    allow_paid=...)), not a soft score -- when False and the only capable
+    route for task_type is a paid/metered one, this returns the distinct
+    'no_eligible_free_local_route' classification instead of silently
+    falling through to founder_gated-then-maybe-approved-into-paid."""
     combined_text = " ".join([objective or "", str(context or ""), task_type or "", " ".join(requested_capabilities)])
 
     keyword_hits = sorted({p.pattern for p in authority_policy.GATED_KEYWORDS if p.search(combined_text)})
@@ -490,11 +512,19 @@ def _first_pass_classify(objective: str, task_type: str, context: str, requested
     if not task_type:
         return "founder_gated", ["no task_type supplied -- default deny on ambiguous/unclassifiable work"]
 
-    matches = studio_router.rank(task_type, allow_founder_gated=False)
-    if not any(m.accepted for m in matches):
-        return "founder_gated", [f"no eligible non-gated capability currently registered for task_type={task_type!r} -- default deny rather than guess a route"]
+    matches = studio_router.rank(task_type, allow_founder_gated=False, allow_paid=paid_resources_allowed)
+    if any(m.accepted for m in matches):
+        return "low", [f"no gated keyword/tool match; an eligible capability exists for task_type={task_type!r} within the paid_resources_allowed={paid_resources_allowed} constraint"]
 
-    return "low", [f"no gated keyword/tool match; an eligible capability exists for task_type={task_type!r}"]
+    if not paid_resources_allowed:
+        matches_if_paid = studio_router.rank(task_type, allow_founder_gated=True, allow_paid=True)
+        if any(m.accepted for m in matches_if_paid):
+            return "no_eligible_free_local_route", [
+                f"a capable engine exists for task_type={task_type!r} but only via a paid/metered provider, "
+                f"and paid_resources_allowed=False -- NEVER silently falling through to a paid engine"
+            ]
+
+    return "founder_gated", [f"no eligible non-gated capability currently registered for task_type={task_type!r} -- default deny rather than guess a route"]
 
 
 def submit_work(
@@ -504,13 +534,22 @@ def submit_work(
     priority_hint: str = "",
     requested_capabilities: list | None = None,
     idempotency_key: str | None = None,
+    paid_resources_allowed: bool = False,
 ) -> dict:
     """Accepts a structured Studio objective and creates exactly one canonical
     Proposal (evolution/proposal.py) if -- and only if -- a safe classification
     can be established. Never executes anything synchronously: advancement
     only ever happens via the existing mrsilent-autonomous-cycle.timer, and
     only for risk_score=='low'. Does not accept and cannot be handed
-    founder_approved=True -- there is no such parameter."""
+    founder_approved=True -- there is no such parameter.
+
+    paid_resources_allowed defaults to False (safe-by-default for this
+    external-facing entry point). It is persisted onto the Proposal and
+    re-enforced as a HARD filter at real execution time by
+    evolution/advance.py._implementation_router() -> studio_router.rank(
+    allow_paid=...) -- so even if availability changes between submission
+    and the timer picking it up 15 minutes later, a paid engine can never be
+    silently selected for a proposal submitted with paid_resources_allowed=False."""
     objective = (objective or "").strip()
     if not objective:
         return {"accepted": False, "reason": "objective is required", "generated_at_utc": _now()}
@@ -532,7 +571,17 @@ def submit_work(
             "generated_at_utc": _now(),
         }
 
-    risk_score, reasons = _first_pass_classify(objective, task_type, context, requested_capabilities)
+    risk_score, reasons = _first_pass_classify(objective, task_type, context, requested_capabilities, paid_resources_allowed)
+
+    if risk_score == "no_eligible_free_local_route":
+        return {
+            "accepted": False,
+            "reason": "NO_ELIGIBLE_FREE_LOCAL_ROUTE",
+            "classification_reasons": reasons,
+            "routing": {"task_type": task_type or None, "requested_capabilities": requested_capabilities, "paid_resources_allowed": paid_resources_allowed},
+            "note": "No Proposal was created. A capable engine exists for this task_type but only via a paid provider; resubmit with paid_resources_allowed=true if that's acceptable, or wait for a free/local capability to become available.",
+            "generated_at_utc": _now(),
+        }
 
     p = proposal_mod.create(
         observed_weakness=f"[CT/ChatGPT submit_work] {objective}"[:2000],
@@ -540,6 +589,7 @@ def submit_work(
         risk_score=risk_score,
         origin="ct_mcp_bridge",
         fingerprint=fingerprint,
+        paid_resources_allowed=paid_resources_allowed,
     )
 
     return {
@@ -549,7 +599,7 @@ def submit_work(
         "classification_reasons": reasons,
         "founder_approval_required": risk_score != "low",
         "status": p.status,
-        "routing": {"task_type": task_type or None, "requested_capabilities": requested_capabilities, "priority_hint": priority_hint or None},
+        "routing": {"task_type": task_type or None, "requested_capabilities": requested_capabilities, "priority_hint": priority_hint or None, "paid_resources_allowed": paid_resources_allowed},
         "execution_path": (
             "Will be auto-advanced by the existing mrsilent-autonomous-cycle.timer (15-min cadence) -- capped at PROMOTION_CANDIDATE, never auto-promoted to real files."
             if risk_score == "low" else
@@ -604,6 +654,7 @@ def work_result(work_id: str) -> dict:
         "context_or_upgrade_text": p.proposed_upgrade,
         "classification": p.risk_score,
         "status": p.status,
+        "paid_resources_allowed": p.paid_resources_allowed,
         "approval_state": approval_state,
         "implementation_attempts": p.implementation_attempts,
         "implementation_job_ids": p.implementation_job_ids,

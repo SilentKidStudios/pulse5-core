@@ -104,19 +104,21 @@ TOOL_SPECS = [
     },
     {
         "name": "route_preview",
-        "description": "PURE DRY RUN. Shows which registered Studio capability would be proposed for a task_type, and whether the task description/tools would trip Founder-gated authority indicators. Creates no job, queue entry, execution, or approval item.",
+        "description": "PURE DRY RUN. Shows which registered Studio capability would be proposed for a task_type, and whether the task description/tools would trip Founder-gated authority indicators. paid_resources_allowed=false is a HARD eligibility filter -- a metered/paid candidate never appears as eligible, same rule submit_work enforces at real execution time. Creates no job, queue entry, execution, or approval item.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_type": {"type": "string", "maxLength": 200},
                 "task_description": {"type": "string", "maxLength": 4000, "default": ""},
                 "requested_tools": {"type": "array", "items": {"type": "string"}, "default": []},
+                "paid_resources_allowed": {"type": "boolean", "default": True},
             },
             "required": ["task_type"],
             "additionalProperties": False,
         },
         "fn": lambda args: T.route_preview(
             args.get("task_type", ""), args.get("task_description", ""), args.get("requested_tools", []),
+            args.get("paid_resources_allowed", True),
         ),
     },
     {
@@ -139,7 +141,7 @@ TOOL_SPECS = [
     },
     {
         "name": "submit_work",
-        "description": "Submit a structured Studio objective. Creates exactly one Proposal in the existing self-evolution pipeline if it can be safely classified (default-deny otherwise). Never executes anything synchronously -- only the existing, already-Founder-authorized 15-minute autonomous-cycle timer ever advances it, and only if classified low-risk, capped at PROMOTION_CANDIDATE (never auto-promoted to real files). No founder_approved override exists here.",
+        "description": "Submit a structured Studio objective. Creates exactly one Proposal in the existing self-evolution pipeline if it can be safely classified (default-deny otherwise). Never executes anything synchronously -- only the existing, already-Founder-authorized 15-minute autonomous-cycle timer ever advances it, and only if classified low-risk, capped at PROMOTION_CANDIDATE (never auto-promoted to real files). paid_resources_allowed defaults to false and is a HARD eligibility filter enforced again at real execution time -- a metered/paid engine (e.g. Claude Code) can never be silently selected when false; if no free/local route exists, this returns NO_ELIGIBLE_FREE_LOCAL_ROUTE and creates no Proposal, rather than falling through to a paid one. No founder_approved override exists here.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -149,6 +151,7 @@ TOOL_SPECS = [
                 "priority_hint": {"type": "string", "maxLength": 50, "default": ""},
                 "requested_capabilities": {"type": "array", "items": {"type": "string", "maxLength": 100}, "maxItems": 20, "default": []},
                 "idempotency_key": {"type": "string", "maxLength": 200},
+                "paid_resources_allowed": {"type": "boolean", "default": False},
             },
             "required": ["objective"],
             "additionalProperties": False,
@@ -156,6 +159,7 @@ TOOL_SPECS = [
         "fn": lambda args: T.submit_work(
             args.get("objective", ""), args.get("task_type", ""), args.get("context", ""),
             args.get("priority_hint", ""), args.get("requested_capabilities", []), args.get("idempotency_key"),
+            args.get("paid_resources_allowed", False),
         ),
     },
     {
