@@ -1483,6 +1483,39 @@ def test_decomposed_model_failover_within_a_phase_uses_real_installed_model_only
     check("phase ultimately finished cleanly after failover", run.final_action == "finish", run.final_action)
 
 
+def test_decomposed_ledger_record_carries_real_files_touched_and_promotion_eligible() -> None:
+    """Regression test for a real bug found via a live work_result check
+    after this feature shipped: the final job_ledger.checkpoint() call
+    computed files_touched/promotion_eligible correctly for the in-memory
+    JobResult but never wrote them back onto the durable LedgerRecord, so
+    job_ledger.load(job_id) (what work_result-style lookups actually read)
+    showed files_touched={} and promotion_eligible=False even for a job that
+    had genuinely succeeded with real file changes."""
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+
+    def runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        # Simulate a real successful tool execution: actually write a file,
+        # the same durable effect a real write_file_sandbox call would have.
+        (workdir / "output.txt").write_text("real content")
+        return _god2_fake_run()
+
+    harness.run_agent_loop = runner
+    _god2_validation.validate = lambda *a, **k: type("V", (), {"passed": True, "to_json": lambda self: {"passed": True, "checks": []}})()
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: ledger fields regression", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+
+    check("JobResult reports promotion_eligible=True", r.promotion_eligible is True, r.promotion_eligible)
+    record = job_ledger.load(r.job_id)
+    check("durable ledger record ALSO shows promotion_eligible=True (not just the in-memory result)",
+          record.promotion_eligible is True, record.promotion_eligible)
+    check("durable ledger record's files_touched reflects the real added file",
+          "output.txt" in record.files_touched.get("added", []), record.files_touched)
+
+
 if __name__ == "__main__":
     test_system_prompt_matches_seeded_source_guard_v2()
     test_write_and_read_roundtrip()
@@ -1529,6 +1562,7 @@ if __name__ == "__main__":
     test_decomposed_gated_task_never_runs_a_phase()
     test_decomposed_phase_state_survives_simulated_crash_and_resume_reads_it()
     test_decomposed_model_failover_within_a_phase_uses_real_installed_model_only()
+    test_decomposed_ledger_record_carries_real_files_touched_and_promotion_eligible()
     test_full_target_loop_live()
 
     print()

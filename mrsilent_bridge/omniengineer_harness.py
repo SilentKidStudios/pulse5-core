@@ -1475,14 +1475,16 @@ def submit_job_decomposed(
             prior_summary = (prior_summary + f"\n[{phase_name}] {entry['summary']}").strip()
 
         if escalated:
+            escalated_files_changed = _diff_snapshots(before_all, _snapshot(workdir))
             job_ledger.checkpoint(job_id, JobState.ESCALATED, terminal_result="escalated", phases=phases_state,
-                                   attempted_models=attempted_models_all, error_class="model_escalate")
+                                   attempted_models=attempted_models_all, error_class="model_escalate",
+                                   files_touched=escalated_files_changed)
             result = JobResult(
                 job_id=job_id, task=task, adapter=OMNI_ENGINEER_ID, model=attempted_models_all[-1] if attempted_models_all else model,
                 risk_class=decision.risk_class.value, approval_state=decision.approval_state.value,
                 status="escalated", workdir=str(workdir), started_at=started_at,
                 ended_at=datetime.now(timezone.utc).isoformat(), duration_s=time.monotonic() - t0,
-                files_changed=_diff_snapshots(before_all, _snapshot(workdir)), plan_text=None,
+                files_changed=escalated_files_changed, plan_text=None,
                 agent_final_action="escalate", agent_summary_or_reason=phases_state[-1]["summary"] if phases_state else None,
                 retried=len(attempted_models_all) > 1, commands_executed=all_commands,
                 attempted_models=attempted_models_all,
@@ -1511,7 +1513,8 @@ def submit_job_decomposed(
             entry = _record_phase(f"repair_{repair_cycles}", repair_objective, run, mdl, attempted)
             if run.final_action == "escalate":
                 job_ledger.checkpoint(job_id, JobState.ESCALATED, terminal_result="escalated", phases=phases_state,
-                                       attempted_models=attempted_models_all, error_class="model_escalate")
+                                       attempted_models=attempted_models_all, error_class="model_escalate",
+                                       files_touched=files_changed, validation_result=vres.to_json())
                 result = JobResult(
                     job_id=job_id, task=task, adapter=OMNI_ENGINEER_ID, model=mdl,
                     risk_class=decision.risk_class.value, approval_state=decision.approval_state.value,
@@ -1555,6 +1558,7 @@ def submit_job_decomposed(
         job_ledger.checkpoint(
             job_id, ledger_state, terminal_result=status, phases=phases_state,
             attempted_models=attempted_models_all, validation_result=vres.to_json(),
+            files_touched=files_changed, promotion_eligible=promotion_eligible,
             error_class=None if status == "succeeded" else "validation",
         )
         result = JobResult(
