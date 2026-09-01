@@ -1608,6 +1608,25 @@ def _god2_fake_jobresult() -> "harness.JobResult":
     )
 
 
+def test_context_staging_excludes_secret_paths_by_default() -> None:
+    """GOD_MODE_V1 FINAL GAP CLOSURE: defense-in-depth -- the context-
+    staging filter itself excludes secret/key-marked paths, independent of
+    (in addition to) authority_policy.GATED_PATH_MARKERS rejecting the
+    whole job for the same paths."""
+    secret_paths = [
+        Path("/opt/pulse5-core/somewhere/secrets/api_key.json"),
+        Path("/opt/pulse5-core/somewhere/.env"),
+        Path("/home/user/.ssh/id_rsa"),
+        Path("/home/user/.aws/credentials"),
+    ]
+    clean = [Path("/opt/pulse5-core/mrsilent_bridge/studio_router.py")]
+    allowed, excluded = harness._stage_context_source_paths(secret_paths + clean)
+    check("all 4 secret/key-marked paths were excluded by the staging filter itself",
+          len(excluded) == 4, excluded)
+    check("none of the excluded paths leaked into the allowed list", not any(p in allowed for p in secret_paths), allowed)
+    check("the normal canonical file remains allowed", clean[0] in allowed, allowed)
+
+
 def test_context_staging_excludes_manual_candidates_and_backups_by_default() -> None:
     noisy = [
         Path("/opt/pulse5-core/mrsilent_bridge/manual_candidates/foo/bar.py"),
@@ -1685,6 +1704,140 @@ def test_narrow_prior_summary_truncates_only_past_the_context_pressure_limit() -
           len(narrowed_long) <= harness.CONTEXT_PRESSURE_SUMMARY_CHAR_LIMIT + 200, len(narrowed_long))
     check("narrowed text keeps the MOST RECENT content (the tail), not the oldest",
           narrowed_long.endswith("x" * 50), narrowed_long[-10:])
+
+
+# ---- GOD_MODE_V1 FINAL GAP CLOSURE: live-safe deterministic-fixture proof for the
+# 3 retry classes the Phase 3 receipt disclosed as unit-tested-only ----
+
+def test_TEST_FAILURE_live_deterministic_fixture_real_validation_and_repair() -> None:
+    """Live-safe deterministic fixture (NOT a mocked validate()): a scripted
+    (deterministic, not random-LLM) agent loop writes a REAL calc.py then a
+    REAL intentionally-wrong test file. validation.validate() is NOT
+    mocked here -- it genuinely runs `python3 -m pytest` as a real
+    subprocess against real files on disk and genuinely fails. The repair
+    phase then genuinely fixes the file and a second real pytest run
+    genuinely passes."""
+    original_run = harness.run_agent_loop
+    calls = {"n": 0}
+
+    def scripted_runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        calls["n"] += 1
+        if calls["n"] == 1:  # inspect
+            return _god2_fake_run("finish", "empty sandbox, nothing to inspect yet")
+        if calls["n"] == 2:  # implement
+            (workdir / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+            return _god2_fake_run("finish", "implemented add()")
+        if calls["n"] == 3:  # test -- deliberately WRONG assertion
+            (workdir / "test_calc.py").write_text(
+                "from calc import add\n\n\ndef test_add():\n    assert add(2, 2) == 5\n"
+            )
+            return _god2_fake_run("finish", "wrote a test for add()")
+        if calls["n"] == 4:  # repair_1 -- genuinely fixes the wrong assertion
+            (workdir / "test_calc.py").write_text(
+                "from calc import add\n\n\ndef test_add():\n    assert add(2, 2) == 4\n"
+            )
+            return _god2_fake_run("finish", "fixed the failing assertion")
+        return _god2_fake_run("finish")
+
+    harness.run_agent_loop = scripted_runner
+    try:
+        r = harness.submit_job_decomposed("synthetic TEST_FAILURE live-fixture: calc.add()", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+
+    record = job_ledger.load(r.job_id)
+    repair_phase = next((p for p in record.phases if p["name"] == "repair_1"), None)
+    check("FAILURE_DETECTED: a repair_1 phase actually ran, proving the FIRST real pytest run genuinely failed",
+          repair_phase is not None, record.phases)
+    check("FAILURE_CLASSIFIED_CORRECTLY: repair_1 is classified test_failure from the real pytest check name",
+          repair_phase is not None and repair_phase.get("failure_class") == "test_failure", repair_phase)
+    check("RECOVERY_STRATEGY_CHANGED (IDENTICAL_BLIND_RETRY=NO): the repair objective's wording is specifically "
+          "TEST_FAILURE-tailored, not a generic 'try again' retry of the identical implement/test phase objective",
+          repair_phase is not None and "TEST_FAILURE" in repair_phase["objective"]
+          and repair_phase["objective"] != repair_phase.get("name"),
+          repair_phase["objective"][:300] if repair_phase else None)
+    check("BOUNDED_RETRY_LIMIT_ENFORCED: exactly 1 repair cycle used, within DECOMPOSED_MAX_REPAIR_CYCLES",
+          0 < sum(1 for p in record.phases if p["name"].startswith("repair_")) <= harness.DECOMPOSED_MAX_REPAIR_CYCLES,
+          record.phases)
+    check("VALID_PROGRESS_PRESERVED: calc.py from the implement phase survived the repair cycle",
+          (Path(r.workdir) / "calc.py").exists(), r.workdir)
+    check("FALSE_SUCCESS=NO / FINAL_OUTCOME_CORRECT=YES: job only succeeded after the SECOND real pytest run genuinely passed",
+          r.status == "succeeded" and bool(r.validation) and r.validation.get("passed") is True, r.validation)
+    test_check = next((c for c in (r.validation or {}).get("checks", []) if c.get("name") == "test_discovery_and_run"), None)
+    check("the final validation evidence is a REAL, passing pytest subprocess run (not faked)",
+          test_check is not None and test_check.get("passed") is True, test_check)
+
+
+def test_CONTEXT_PRESSURE_live_deterministic_fixture_real_orchestration_narrows_prior_summary() -> None:
+    """Live-safe deterministic fixture proving CONTEXT_PRESSURE fires
+    INSIDE the real submit_job_decomposed() orchestration (not just via a
+    direct call to _narrow_prior_summary()). The char-limit constant is
+    temporarily lowered for this test only so 2 real phases' worth of
+    (real, 800-char-capped-per-phase) accumulated summaries genuinely
+    exceed it -- the narrowing MECHANISM itself is exercised for real."""
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    original_limit = harness.CONTEXT_PRESSURE_SUMMARY_CHAR_LIMIT
+    phase_prompts: list[str] = []
+
+    def scripted_runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        phase_prompts.append(task_text)
+        return _god2_fake_run("finish", "X" * 2000)  # each phase reports a long summary (truncated to 800 in the record)
+
+    harness.run_agent_loop = scripted_runner
+    harness.CONTEXT_PRESSURE_SUMMARY_CHAR_LIMIT = 1000  # lowered for this test only
+    _god2_validation.validate = lambda *a, **k: type("V", (), {"passed": True, "to_json": lambda self: {"passed": True, "checks": []}})()
+    try:
+        r = harness.submit_job_decomposed("synthetic CONTEXT_PRESSURE live-fixture: 3 long-summary phases", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+        harness.CONTEXT_PRESSURE_SUMMARY_CHAR_LIMIT = original_limit
+
+    check("job completes normally", r.status == "succeeded", r.status)
+    check("3 base phases ran", len(phase_prompts) == 3, len(phase_prompts))
+    check("phase 1 (inspect) has no prior-progress section yet", "VERIFIED PROGRESS SO FAR" not in phase_prompts[0], None)
+    check("phase 2's accumulated prior_summary (~800 chars) is still under the (lowered) 1000-char limit -- not yet narrowed",
+          "context pressure" not in phase_prompts[1].lower(), phase_prompts[1][-200:])
+    check("CONTEXT_PRESSURE fired FOR REAL inside submit_job_decomposed(): phase 3's prompt shows the real narrowing marker",
+          "context pressure" in phase_prompts[2].lower(), phase_prompts[2][-400:])
+
+
+def test_PARTIAL_IMPLEMENTATION_live_deterministic_fixture_real_file_survives_escalation() -> None:
+    """Live-safe deterministic fixture: the implement phase genuinely
+    writes a real file to disk, then the test phase genuinely escalates.
+    Proves partial_progress reflects the REAL file (not an empty dict) and
+    that the file is still physically present in the sandbox afterward."""
+    original_run = harness.run_agent_loop
+
+    def scripted_runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        # Match the exact phase marker (never a loose substring) -- the
+        # task description itself echoes into every phase's prompt, and a
+        # loose "IMPLEMENT"/"TEST" substring check would false-match on the
+        # word 'PARTIAL_IMPLEMENTATION' in this test's own task text.
+        if "CURRENT PHASE: IMPLEMENT" in task_text:
+            (workdir / "partial_module.py").write_text("def half_done():\n    pass\n")
+            return _god2_fake_run("finish", "wrote partial_module.py, ran out of clear next steps")
+        if "CURRENT PHASE: TEST" in task_text:
+            return _god2_fake_run("escalate", "cannot determine how to test partial_module.py without more direction")
+        return _god2_fake_run("finish", "inspected empty sandbox")
+
+    harness.run_agent_loop = scripted_runner
+    try:
+        r = harness.submit_job_decomposed("synthetic PARTIAL_IMPLEMENTATION live-fixture", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+
+    check("job status is escalated", r.status == "escalated", r.status)
+    check("FAILURE_DETECTED / VALID_PROGRESS_PRESERVED: partial_progress names the REAL added file",
+          r.partial_progress is not None
+          and "partial_module.py" in r.partial_progress.get("files_touched_before_escalation", {}).get("added", []),
+          r.partial_progress)
+    check("the real file is still physically present in the sandbox after escalation (not cleaned up/lost)",
+          (Path(r.workdir) / "partial_module.py").exists(), r.workdir)
+    check("FALSE_SUCCESS=NO: an escalated job is never promotion_eligible", r.promotion_eligible is False, r.promotion_eligible)
+    check("FINAL_OUTCOME_CORRECT: phase_that_escalated correctly names 'test', not 'implement'",
+          r.partial_progress is not None and r.partial_progress.get("phase_that_escalated") == "test", r.partial_progress)
 
 
 def test_adaptive_retry_matrix_covers_all_nine() -> None:
@@ -1868,10 +2021,14 @@ if __name__ == "__main__":
     test_classify_complexity_multi_stage_synthetic_task_is_eligible()
     test_submit_job_auto_dispatches_simple_task_to_submit_job()
     test_submit_job_auto_dispatches_complex_task_to_submit_job_decomposed()
+    test_context_staging_excludes_secret_paths_by_default()
     test_context_staging_excludes_manual_candidates_and_backups_by_default()
     test_decomposed_source_paths_are_staged_and_excluded_ones_are_recorded_not_copied()
     test_classify_validation_failure_distinguishes_test_from_generic()
     test_narrow_prior_summary_truncates_only_past_the_context_pressure_limit()
+    test_TEST_FAILURE_live_deterministic_fixture_real_validation_and_repair()
+    test_CONTEXT_PRESSURE_live_deterministic_fixture_real_orchestration_narrows_prior_summary()
+    test_PARTIAL_IMPLEMENTATION_live_deterministic_fixture_real_file_survives_escalation()
     test_adaptive_retry_matrix_covers_all_nine()
     test_phase_narrative_preserves_earlier_model_progress_after_later_model_failure()
     test_no_progress_detection_stops_before_exhausting_every_candidate_model()

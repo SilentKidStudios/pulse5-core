@@ -93,10 +93,18 @@ Why this is safe to run unattended for low-risk proposals:
   - eligibility requires risk_score == "low" AND status in {observed, proposed}
     — anything else (medium/founder_gated, or already past this pipeline)
     is left alone
-  - SAFE SANDBOX IMPLEMENT never passes source_paths to bridge.submit_job or
-    omniengineer_harness.submit_job — structurally, the implementing job can
-    only ever create NEW files in a fresh empty sandbox, at EITHER engine.
-    That is what makes "no recursive self-modification" true by construction.
+  - SAFE SANDBOX IMPLEMENT never passes source_paths to bridge.submit_job
+    (Claude Code) at all -- that engine's implementing job can only ever
+    create NEW files in a fresh empty sandbox, structurally. For
+    omni_engineer_v1, source_paths is threaded from the proposal's OWN
+    p.source_paths field (GOD_MODE_V1 FINAL GAP CLOSURE) -- defaults to []
+    for every existing/automatic proposal (identical empty-sandbox
+    behavior, unchanged), and only ever carries real paths when a caller
+    EXPLICITLY authorizes them on the proposal itself; still GOVERNED by
+    the same authority_policy.GATED_PATH_MARKERS check and the
+    context-staging default-exclusion filter as a direct submit_job_decomposed()
+    call. "No recursive self-modification" therefore still holds by
+    construction for every proposal that does not explicitly opt in.
   - every implementing job, at every engine, still goes through
     authority_policy.classify() same as any other — a rejected_policy
     outcome is TERMINAL (deterministic across engines, never routed around).
@@ -200,11 +208,27 @@ class ImplementationOutcome:
 
 
 def _build_task_text(p: proposal_mod.Proposal) -> str:
+    # GOD_MODE_V1 FINAL GAP CLOSURE: a proposal with explicit source_paths
+    # (GOVERNED, authority-checked, context-staging-filtered -- see
+    # _run_omni_engineer()) gets staged real files, so the "sandbox is
+    # EMPTY" claim below would be false for it. The overwhelming majority
+    # of proposals (source_paths defaults to []) get byte-for-byte the same
+    # text as before.
+    if p.source_paths:
+        sandbox_note = (
+            "This sandbox has been pre-staged with SPECIFIC, EXPLICITLY AUTHORIZED canonical "
+            "source file(s)/director(y/ies) relevant to this task -- inspect what is actually "
+            "there before making changes. Do not assume any files exist beyond what you find "
+            "staged; nothing outside this sandbox is available to you regardless."
+        )
+    else:
+        sandbox_note = (
+            "This sandbox directory is EMPTY and isolated — do not assume any other files exist "
+            "anywhere, and do not attempt to reference, open, or reason about files outside this "
+            "directory (there are none available to you regardless)."
+        )
     return (
-        "You are implementing a small, self-contained prototype for a proposed upgrade. "
-        "This sandbox directory is EMPTY and isolated — do not assume any other files exist "
-        "anywhere, and do not attempt to reference, open, or reason about files outside this "
-        "directory (there are none available to you regardless).\n\n"
+        f"You are implementing a small, self-contained prototype for a proposed upgrade. {sandbox_note}\n\n"
         f"Observed weakness: {p.observed_weakness}\n"
         f"Proposed upgrade: {p.proposed_upgrade}\n\n"
         "Create one small, correct, self-contained file (or a couple of files) that "
@@ -350,14 +374,25 @@ def _run_omni_engineer(task_text: str, requested_by: str, proposal_id: str) -> t
     # submit_job() (simple) or submit_job_decomposed() (complex) -- this is
     # the ONLY change to the canonical Proposal->router->engine pipeline;
     # _implementation_router()/_rank_engineering_engines()/studio_router are
-    # untouched. source_paths is intentionally NOT passed here: this call
-    # site is the fully-automatic advance_one() pipeline, which by design
-    # (see this module's docstring, "no recursive self-modification") never
-    # gives an implementing job real source_paths at either engine, simple
-    # or decomposed.
+    # untouched.
+    #
+    # GOD_MODE_V1 FINAL GAP CLOSURE: source_paths is now threaded through
+    # from the proposal itself (p.source_paths, GOVERNED, authority-checked,
+    # context-staging-filtered -- see omniengineer_harness.py). The
+    # PROPOSAL is re-read here (a cheap, isolated disk read) rather than
+    # widening the shared 3-arg _ENGINE_RUNNERS signature every engine
+    # runner (including _run_claude_code, unchanged/out of this campaign's
+    # scope) is called with -- keeps this a one-function, one-engine change.
+    # p.source_paths defaults to [] for every existing/automatic proposal,
+    # so this is a NO-OP for the overwhelming majority of proposals --
+    # "no recursive self-modification" stays true by construction unless a
+    # caller explicitly authorizes specific real paths on the proposal
+    # itself (never inferred, never guessed, never widened by this code).
+    p = proposal_mod.load(proposal_id)
     job = omniengineer_harness.submit_job_auto(
         task=task_text, requested_by=requested_by,
         timeout_s=OMNI_IMPLEMENT_TIMEOUT_S, founder_approved=False,
+        source_paths=p.source_paths or None,
         on_job_created=lambda jid: proposal_mod.append_implementation_job(
             proposal_id, jid, engine="omni_engineer", note="job created (linked before execution)"),
     )

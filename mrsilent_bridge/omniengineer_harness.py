@@ -1480,7 +1480,9 @@ _PHASE_TOOLS: dict[str, frozenset[str]] = {
 }
 
 
-def _phase_task_text(parent_task: str, phase_name: str, phase_objective: str, prior_summary: str, allowed_tools: frozenset[str] | None) -> str:
+def _phase_task_text(parent_task: str, phase_name: str, phase_objective: str, prior_summary: str,
+                      allowed_tools: frozenset[str] | None,
+                      staged_source_summary: list[str] | None = None) -> str:
     parts = [
         "You are working on ONE BOUNDED PHASE of a larger, already-authorized engineering "
         "objective. Complete ONLY this phase's objective, then call finish with a short summary "
@@ -1489,6 +1491,20 @@ def _phase_task_text(parent_task: str, phase_name: str, phase_objective: str, pr
         f"\nCURRENT PHASE: {phase_name.upper()}",
         f"\nPHASE OBJECTIVE:\n{phase_objective}",
     ]
+    # PHASE_SOURCE_PATHS_NARROWING (GOD_MODE_V1 FINAL GAP CLOSURE): the raw
+    # staged-file list is only restated to the INSPECT phase (whose job is
+    # to survey everything authorized). Later phases receive the SAME files
+    # in their sandbox (already copied once, before inspect -- never
+    # re-copied, never broadened) but are NOT re-told the full list; they
+    # rely on prior_summary (the inspect phase's own distilled findings,
+    # itself bounded by CONTEXT_PRESSURE narrowing) instead. This is
+    # deliberately narrower prompt context per phase, not merely "the same
+    # thing every time."
+    if staged_source_summary:
+        parts.append(
+            "\nPRE-STAGED AUTHORIZED SOURCE FILE(S) in this sandbox (inspect these; nothing else "
+            "exists outside this sandbox regardless):\n- " + "\n- ".join(staged_source_summary)
+        )
     # Real incident this addresses: an inspect-phase run tried something
     # needing write access, got a correct structural refusal (inspect is
     # deliberately read-only), and escalated with "write permissions are
@@ -1543,6 +1559,7 @@ def _classify_validation_failure(vres: Any) -> str:
 def _run_phase(
     phase_name: str, phase_objective: str, workdir: Path, *, parent_task: str,
     prior_summary: str, model: str, max_iterations: int, timeout_s: int,
+    staged_source_summary: list[str] | None = None,
 ) -> tuple[Any, str, list[str], list[dict[str, Any]]]:
     """Runs ONE bounded phase in the SAME sandbox the parent job already
     owns. Bounded model failover on a retryable outcome (iteration_ceiling_
@@ -1563,7 +1580,8 @@ def _run_phase(
     then failed. Returns (AgentRunResult, model_actually_used,
     attempted_models, attempt_history)."""
     allowed = _PHASE_TOOLS.get(phase_name)
-    task_text = _phase_task_text(parent_task, phase_name, phase_objective, prior_summary, allowed)
+    task_text = _phase_task_text(parent_task, phase_name, phase_objective, prior_summary, allowed,
+                                  staged_source_summary=staged_source_summary)
     attempted: list[str] = []
     attempt_history: list[dict[str, Any]] = []
     current_model = model
@@ -1645,11 +1663,24 @@ CONTEXT_STAGING_DEFAULT_EXCLUDED_MARKERS = (
     "/backups/",
     "_backup/",
     "archived_jobs",
+    "archive/",  # generic archive trees, distinct from archived_jobs above
     "founder_receipts",
     "content_packet",
     "/logs/",
     ".log",
     "/jobs/",  # another job's own historical workdir tree
+    # GOD_MODE_V1 FINAL GAP CLOSURE: defense-in-depth secret/key exclusion.
+    # authority_policy.GATED_PATH_MARKERS already REJECTS the whole job
+    # outright (a stronger guarantee) if a source_path touches one of these
+    # -- this list ensures the STAGING layer itself never copies such a
+    # path either, in case a future caller reaches this filter through a
+    # path that does not also run classify() first.
+    "secrets",
+    "credentials",
+    ".env",
+    "/.ssh",
+    "/.aws",
+    "/.config/gcloud",
 )
 
 
@@ -1759,15 +1790,23 @@ def submit_job_decomposed(
         # reported as "added" by any phase -- only what a phase actually
         # changes shows up in files_changed. No later phase re-copies or
         # extends this set -- source_paths cannot silently broaden mid-job.
+        staged_relative_names: list[str] = []
         if staged_source_paths:
             import shutil as _shutil
             for src in staged_source_paths:
                 dest = _source_sandbox_destination(workdir, src)
                 if src.is_dir():
                     _shutil.copytree(src, dest, dirs_exist_ok=True)
+                    # List individual staged files (bounded), not just the
+                    # directory name -- the model needs real filenames to
+                    # act on, not merely "a directory exists".
+                    staged_relative_names.extend(
+                        str(f.relative_to(workdir)) for f in sorted(dest.rglob("*"))[:50] if f.is_file()
+                    )
                 elif src.is_file():
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     _shutil.copy2(src, dest)
+                    staged_relative_names.append(str(dest.relative_to(workdir)))
 
         before_all = _snapshot(workdir)
         phases_state: list[dict[str, Any]] = []
@@ -1820,10 +1859,13 @@ def submit_job_decomposed(
             if len(phases_state) >= DECOMPOSED_MAX_TOTAL_PHASES:
                 break
             prior_summary, _narrowed = _narrow_prior_summary(prior_summary)  # CONTEXT_PRESSURE
+            # PHASE_SOURCE_PATHS_NARROWING: only 'inspect' is (re-)told the
+            # staged file list -- later phases rely on prior_summary alone.
             run, mdl, attempted, attempt_history = _run_phase(
                 phase_name, phase_objective, workdir, parent_task=task, prior_summary=prior_summary,
                 model=model, max_iterations=max_iterations_per_phase,
                 timeout_s=max(30, timeout_s - int(time.monotonic() - t0)),
+                staged_source_summary=staged_relative_names if phase_name == "inspect" else None,
             )
             entry = _record_phase(phase_name, phase_objective, run, mdl, attempted, attempt_history)
             if run.final_action == "escalate":

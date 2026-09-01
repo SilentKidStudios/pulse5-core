@@ -60,6 +60,14 @@ class Proposal:
     # store and the OBSERVE engine, neither of which ever declared this
     # constraint; the external-facing entry point (th3_mcp's submit_work)
     # defaults its OWN parameter to False instead, at that call site only.
+    source_paths: list[str] = field(default_factory=list)  # GOD_MODE_V1 FINAL GAP CLOSURE: real, explicitly-authorized
+    # canonical source files/dirs a caller wants staged into the implementing job's sandbox
+    # (see evolution/advance.py._run_omni_engineer(), omniengineer_harness.submit_job_decomposed()).
+    # Default empty list preserves EXACT prior behavior for every existing/automatic proposal —
+    # only a caller that explicitly sets this (e.g. a real TH3 submit_work payload naming
+    # specific files) gets anything staged at all. Still subject to the SAME
+    # authority_policy.GATED_PATH_MARKERS check and the context-staging default-exclusion
+    # filter as submit_job()/submit_job_decomposed() already apply.
 
 
 # Event-driven pickup wake signal (mrsilent-autonomous-cycle.path watches
@@ -99,6 +107,7 @@ def create(
     fingerprint: str | None = None,
     source_observation_ids: list[str] | None = None,
     paid_resources_allowed: bool = True,
+    source_paths: list[str] | None = None,
 ) -> Proposal:
     PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
     p = Proposal(
@@ -111,6 +120,7 @@ def create(
         fingerprint=fingerprint,
         source_observation_ids=source_observation_ids or [],
         paid_resources_allowed=paid_resources_allowed,
+        source_paths=source_paths or [],
     )
     p.history.append({"at": p.created_at, "event": "created", "status": p.status})
     save(p)

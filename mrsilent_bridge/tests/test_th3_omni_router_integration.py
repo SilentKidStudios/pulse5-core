@@ -28,6 +28,7 @@ Run: python3 tests/test_th3_omni_router_integration.py
 """
 from __future__ import annotations
 
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -170,8 +171,123 @@ def test_th3_submit_work_payload_reaches_omni_decomposed_path() -> None:
           "n/a")
 
 
+def test_source_paths_flow_end_to_end_through_th3_to_decomposed_omni() -> None:
+    """GOD_MODE_V1 FINAL GAP CLOSURE: proves source_paths survives the
+    ENTIRE real control-plane path -- TH3-style payload -> Proposal
+    (source_paths preserved in its own durable lineage) -> canonical router
+    -> omni_engineer_v1 -> complexity classification -> submit_job_decomposed
+    -> GOVERNED authority check -> context-staging exclusion -> real copy
+    into the sandbox -> per-phase narrowing (only 'inspect' is told the
+    staged file list). Same claude_code-infra_failure fallback technique as
+    the test above; still fully isolated (no live model call)."""
+    real_src_dir = Path(tempfile.mkdtemp(prefix="p3final_real_src_"))
+    (real_src_dir / "helper.py").write_text("# real canonical helper, explicitly authorized\n")
+
+    noise_root = Path(tempfile.mkdtemp(prefix="p3final_noise_"))
+    manual_candidates_dir = noise_root / "manual_candidates"
+    manual_candidates_dir.mkdir()
+    (manual_candidates_dir / "withdrawn.py").write_text("# must never be staged\n")
+    backup_dir = noise_root / "continuity_backup"
+    backup_dir.mkdir()
+    (backup_dir / "old.py").write_text("# must never be staged\n")
+
+    p = proposal_mod.create(
+        observed_weakness=_TH3_SUBMIT_WORK_PAYLOAD["observed_weakness"],
+        proposed_upgrade=_TH3_SUBMIT_WORK_PAYLOAD["proposed_upgrade"],
+        risk_score=_TH3_SUBMIT_WORK_PAYLOAD["risk_score"],
+        origin="th3_submit_work_source_paths_final_gap_closure",
+        paid_resources_allowed=False,
+        source_paths=[str(real_src_dir), str(manual_candidates_dir), str(backup_dir)],
+    )
+    check("SOURCE_PATHS_RECEIVED_AT_TH3_ENTRY: the proposal carries exactly the 3 requested source_paths",
+          sorted(p.source_paths) == sorted([str(real_src_dir), str(manual_candidates_dir), str(backup_dir)]), p.source_paths)
+
+    p_reloaded = proposal_mod.load(p.proposal_id)
+    check("SOURCE_PATHS_PRESERVED_IN_PROPOSAL_LINEAGE: a fresh disk read shows the same source_paths",
+          sorted(p_reloaded.source_paths) == sorted(p.source_paths), p_reloaded.source_paths)
+
+    original_claude_runner = advance._ENGINE_RUNNERS["claude_code"]
+    advance._ENGINE_RUNNERS["claude_code"] = lambda task_text, requested_by, proposal_id: (
+        advance.EngineAttempt("claude_code", "infra_failure", "claude_code unavailable (test fixture)", None, "infra_failure"),
+        None,
+    )
+    original_run = harness.run_agent_loop
+    original_validate = _validation.validate
+    original_submit_job_decomposed = harness.submit_job_decomposed
+    original_submit_job = harness.submit_job
+    decomposed_call_kwargs: dict = {}
+    phase_task_texts: list[tuple[str, str]] = []  # (model, task_text) per real_agent_loop call
+
+    def spy_submit_job_decomposed(*a, **k):
+        decomposed_call_kwargs.update(k)
+        if a:
+            decomposed_call_kwargs["task"] = a[0]
+        return original_submit_job_decomposed(*a, **k)
+
+    def fail_if_called_submit_job(*a, **k):
+        raise AssertionError("simple submit_job() was called -- should have routed to submit_job_decomposed()")
+
+    def recording_run_agent_loop(task_text, workdir, **k):
+        phase_task_texts.append((k.get("model", "x"), task_text))
+        return agent.AgentRunResult(
+            task="x", sandbox="x", model=k.get("model", "x"), final_action="finish",
+            summary_or_reason="synthetic phase completed", commands_executed=[],
+        )
+
+    harness.run_agent_loop = recording_run_agent_loop
+    _validation.validate = _fake_validate_pass
+    harness.submit_job_decomposed = spy_submit_job_decomposed
+    harness.submit_job = fail_if_called_submit_job
+
+    try:
+        result = advance.advance_one(p.proposal_id, requested_by="th3_submit_work_source_paths_final_gap_closure")
+    finally:
+        advance._ENGINE_RUNNERS["claude_code"] = original_claude_runner
+        harness.run_agent_loop = original_run
+        _validation.validate = original_validate
+        harness.submit_job_decomposed = original_submit_job_decomposed
+        harness.submit_job = original_submit_job
+        shutil.rmtree(real_src_dir, ignore_errors=True)
+        shutil.rmtree(noise_root, ignore_errors=True)
+
+    check("CANONICAL_ROUTER + OMNI_ENGINEER_SELECTED (precondition for everything below)",
+          result.selected_engine == "omni_engineer", result.selected_engine)
+
+    reached = decomposed_call_kwargs.get("source_paths") or []
+    check("SOURCE_PATHS_REACH_OMNI_BOUNDARY: submit_job_decomposed() received all 3 raw proposal source_paths "
+          "(unfiltered at this boundary -- filtering happens inside submit_job_decomposed itself)",
+          sorted(reached) == sorted(p.source_paths), reached)
+    check("SOURCE_PATHS_REACH_DECOMPOSED_PARENT: same list, confirmed reaching the decomposed entry point directly",
+          sorted(reached) == sorted([str(real_src_dir), str(manual_candidates_dir), str(backup_dir)]), reached)
+
+    record = job_ledger.load(result.implementation_job_id)
+    workdir = Path(record.sandbox_path)
+    all_staged_files = list(workdir.rglob("*"))
+    check("the authorized, non-excluded helper.py WAS staged into the real sandbox",
+          any(f.name == "helper.py" for f in all_staged_files), [str(f) for f in all_staged_files])
+    check("MANUAL_CANDIDATES_EXCLUDED: withdrawn.py never reached the sandbox",
+          not any(f.name == "withdrawn.py" for f in all_staged_files), [str(f) for f in all_staged_files])
+    check("BACKUPS_EXCLUDED: old.py (continuity_backup) never reached the sandbox",
+          not any(f.name == "old.py" for f in all_staged_files), [str(f) for f in all_staged_files])
+    check("WHOLE_REPO_FALLBACK=NO: the sandbox stayed small/bounded, not a whole-repo dump",
+          len(all_staged_files) < 20, len(all_staged_files))
+
+    excluded_recorded = (record.submit_params or {}).get("context_staging_excluded", [])
+    check("both exclusions are durably recorded with their reason, not silently dropped",
+          len(excluded_recorded) == 2, excluded_recorded)
+
+    first_model, first_text = phase_task_texts[0] if phase_task_texts else (None, "")
+    check("PHASE_SOURCE_PATHS_NARROWED: the 'inspect' phase call's task_text lists the staged file",
+          "helper.py" in first_text and "PRE-STAGED AUTHORIZED SOURCE FILE" in first_text,
+          first_text[-600:])
+    check("PHASE_SOURCE_PATHS_NARROWED: LATER phases' task_text does NOT restate the staged file list",
+          all("PRE-STAGED AUTHORIZED SOURCE FILE" not in txt for _, txt in phase_task_texts[1:]),
+          [t[1][:200] for t in phase_task_texts[1:]])
+
+
 if __name__ == "__main__":
     test_th3_submit_work_payload_reaches_omni_decomposed_path()
+    test_source_paths_flow_end_to_end_through_th3_to_decomposed_omni()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILURE(S): {FAILURES}")
