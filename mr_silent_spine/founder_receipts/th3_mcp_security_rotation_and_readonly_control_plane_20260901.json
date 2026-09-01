@@ -1,0 +1,64 @@
+{
+  "created_utc": "2026-09-01T02:24:48Z",
+  "campaign": "CHATGPT_WORK_MR_SILENT_GOVERNED_CONTROL_PLANE (Phase 1 + read-only Phase 2 only)",
+  "status": "PASS",
+  "scope": "THIS session only; submit_work/cancel_work/request_founder_decision and any real work-execution action were explicitly NOT built in this pass.",
+
+  "phase_1_token_rotation": {
+    "reason": "existing th3-mcp bearer token was partially exposed in a screenshot",
+    "token_path": "secure_keys/th3_mcp_http_bearer.key",
+    "only_known_consumer": "services/th3_mcp/http_server.py (_load_token(), read once at process start into module-global _TOKEN)",
+    "search_performed": "grep -rl 'th3_mcp_http_bearer' across services/, mr_silent_spine/state/, engine/, mrsilent_bridge/, and a full repo-wide grep; no other consumer found",
+    "auth_architecture_changed": false,
+    "old_token_rejected": true,
+    "new_token_accepted_initialize": true,
+    "new_token_accepted_tools_list": true,
+    "secret_value_ever_printed": false,
+    "service_restarted": "th3-mcp-http.service (systemctl restart, clean, isolated to this one unit)",
+    "gitignore_hardened": ".gitignore had no rule for secure_keys/ (it was untracked-but-not-ignored, a latent risk for a future `git add -A`); added an explicit secure_keys/ rule this pass"
+  },
+
+  "phase_2_readonly_tools": {
+    "existing_5_tools_preserved_unchanged": ["studio_status", "priority_status", "registry_search", "request_simulation", "council_post_result"],
+    "new_readonly_tools_added": ["work_status", "active_work", "route_preview", "capability_status", "runtime_health", "continuum_status"],
+    "total_tools_after": 11,
+    "canonical_sources_reused_not_duplicated": {
+      "work_intake_and_queue": "mrsilent_bridge/job_ledger.py (jobs/<id>/ledger.json)",
+      "permission_classifier": "mrsilent_bridge/authority_policy.py (GATED_TOOLS/GATED_ADAPTERS/GATED_KEYWORDS constants referenced, not duplicated)",
+      "worker_router": "mrsilent_bridge/studio_router.py.rank() -- documented pure/no-side-effect query, used for route_preview instead of the mutating select()",
+      "priority_governor": "mr_silent_spine/autonomous_exec/founder_priority_governor.py, read via founder_top10_priority_queue.json + founder_priority_state.json (same files studio_status/priority_status already use)",
+      "capability_registry": "mrsilent_bridge/capability_registry.py",
+      "runtime_health_units": "fixed, hardcoded systemd unit list (th3-mcp-http, founder-free-studio-runtime x3, mr-silent-awareness-loop) -- no arbitrary systemctl capability exposed"
+    },
+    "no_new_governor_scheduler_queue_or_priority_store_created": true,
+    "route_preview_verified_no_side_effects": "uses studio_router.rank() only, never select() (which writes an audit entry / capability-gap record)",
+    "no_shell_sql_arbitrary_fetch_or_credential_retrieval_exposed": true,
+    "regression": {
+      "existing_5_tools_local_dispatch": "PASS",
+      "existing_5_tools_remote_studio_status_call": "PASS (HTTP 200, isError:false)",
+      "remote_tools_list_count": 11
+    },
+    "new_tools_local_dispatch": "PASS (all 6, isError:false)",
+    "new_tools_remote_call_sample": "runtime_health -- PASS (HTTP 200, isError:false)"
+  },
+
+  "files_changed": [
+    "services/th3_mcp/tools.py",
+    "services/th3_mcp/mcp_core.py",
+    ".gitignore"
+  ],
+  "files_created": [
+    "mr_silent_spine/founder_receipts/th3_mcp_security_rotation_and_readonly_control_plane_20260901.json"
+  ],
+  "other_active_session_files_touched": false,
+  "qwen_phase3_touched": false,
+  "local_model_health_py_touched": false,
+  "walkaway_completion_authority_touched": false,
+  "new_governor_scheduler_queue_or_runtime_created": false,
+
+  "deferred_to_a_separately_reviewed_pass": [
+    "submit_work", "work_result", "approval_status", "request_founder_decision", "cancel_work",
+    "any tool that creates a job, queue entry, or executes work"
+  ],
+  "next_step": "Founder reconnects TH3 Studio in ChatGPT/Claude.ai with the rotated token and refreshes actions. The write/execution slice (submit_work etc.) is intentionally not part of this receipt and was not implemented."
+}

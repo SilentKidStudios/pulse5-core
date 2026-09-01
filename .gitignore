@@ -44,3 +44,13 @@ all-objects.txt
 *.swp
 .idea/
 .vscode/
+
+# secrets -- was untracked-but-not-ignored; explicit rule to prevent an
+# accidental `git add -A`/`.` from ever staging a live bearer token/key
+secure_keys/
+
+# th3_mcp: live OAuth tokens/client secrets and access logs -- was
+# untracked-but-not-ignored (found while committing tools.py/mcp_core.py
+# for the first time); same reasoning as secure_keys/ above
+services/th3_mcp/oauth_state/
+services/th3_mcp/logs/
