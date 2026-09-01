@@ -300,6 +300,43 @@ def active_work(limit: int = 20) -> dict:
     }
 
 
+# Root-cause fix (canonical engineering capability route repair): a
+# Founder/ChatGPT-facing caller naturally says "engineering" for ordinary
+# sandboxed coding work, but that string has NEVER been a registered
+# task_type in registry_data/capabilities.json (52 real task_types exist;
+# the actual one is "code_edit", and it is also the ONLY task_type
+# evolution/advance.py._implementation_router() ever routes to at real
+# execution time -- hardcoded, since this proposal pipeline only ever
+# implements sandboxed file/code prototypes). This is a pure external-facing
+# naming normalization, not a routing/authority/resource-policy change: no
+# capability is registered for anything it can't do, no new task_type is
+# invented, and anything NOT in this short, explicit alias list still falls
+# through to the existing default-deny in _first_pass_classify unchanged.
+_TASK_TYPE_ALIASES = {
+    "engineering": "code_edit",
+    "engineer": "code_edit",
+    "software_engineering": "code_edit",
+    "coding": "code_edit",
+    "code": "code_edit",
+    "development": "code_edit",
+    "dev": "code_edit",
+    "implementation": "code_edit",
+}
+
+
+def _normalize_task_type(task_type: str) -> tuple[str, bool]:
+    """(canonical_task_type, was_normalized). Unknown/unrecognized values
+    pass through completely unchanged -- this only repairs the specific,
+    proven naming mismatch, it does not guess at arbitrary input."""
+    if not task_type:
+        return task_type, False
+    key = task_type.strip().lower().replace(" ", "_").replace("-", "_")
+    canonical = _TASK_TYPE_ALIASES.get(key)
+    if canonical and canonical != task_type:
+        return canonical, True
+    return task_type, False
+
+
 def route_preview(task_type: str, task_description: str = "", requested_tools: list | None = None, paid_resources_allowed: bool = True) -> dict:
     """PURE DRY RUN. Shows how studio_router would rank candidates for
     task_type (studio_router.rank() is documented as side-effect-free -- no
@@ -316,6 +353,8 @@ def route_preview(task_type: str, task_description: str = "", requested_tools: l
     duty-cycle/health-based ordering among whatever remains eligible (which
     can legitimately shift between calls)."""
     requested_tools = set(requested_tools or [])
+    submitted_task_type = task_type
+    task_type, was_normalized = _normalize_task_type(task_type)
     open_evals = studio_router.rank(task_type, allow_founder_gated=False, allow_paid=paid_resources_allowed)
     all_evals = studio_router.rank(task_type, allow_founder_gated=True, allow_paid=paid_resources_allowed)
 
@@ -345,7 +384,9 @@ def route_preview(task_type: str, task_description: str = "", requested_tools: l
 
     return {
         "dry_run": True,
+        "task_type_submitted": submitted_task_type,
         "task_type": task_type,
+        "task_type_was_normalized": was_normalized,
         "paid_resources_allowed": paid_resources_allowed,
         "candidates_open_now": [asdict(e) for e in open_evals],
         "candidates_if_founder_approved": [asdict(e) for e in all_evals],
@@ -555,6 +596,8 @@ def submit_work(
         return {"accepted": False, "reason": "objective is required", "generated_at_utc": _now()}
 
     requested_capabilities = [str(c) for c in (requested_capabilities or [])][:20]
+    submitted_task_type = task_type
+    task_type, task_type_was_normalized = _normalize_task_type(task_type)
 
     fingerprint_source = idempotency_key.strip() if idempotency_key else objective.lower()
     fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()[:16]
@@ -578,7 +621,7 @@ def submit_work(
             "accepted": False,
             "reason": "NO_ELIGIBLE_FREE_LOCAL_ROUTE",
             "classification_reasons": reasons,
-            "routing": {"task_type": task_type or None, "requested_capabilities": requested_capabilities, "paid_resources_allowed": paid_resources_allowed},
+            "routing": {"task_type_submitted": submitted_task_type, "task_type": task_type, "task_type_was_normalized": task_type_was_normalized, "requested_capabilities": requested_capabilities, "paid_resources_allowed": paid_resources_allowed},
             "note": "No Proposal was created. A capable engine exists for this task_type but only via a paid provider; resubmit with paid_resources_allowed=true if that's acceptable, or wait for a free/local capability to become available.",
             "generated_at_utc": _now(),
         }
@@ -599,7 +642,7 @@ def submit_work(
         "classification_reasons": reasons,
         "founder_approval_required": risk_score != "low",
         "status": p.status,
-        "routing": {"task_type": task_type or None, "requested_capabilities": requested_capabilities, "priority_hint": priority_hint or None, "paid_resources_allowed": paid_resources_allowed},
+        "routing": {"task_type_submitted": submitted_task_type, "task_type": task_type, "task_type_was_normalized": task_type_was_normalized, "requested_capabilities": requested_capabilities, "priority_hint": priority_hint or None, "paid_resources_allowed": paid_resources_allowed},
         "execution_path": (
             "Will be auto-advanced by the existing mrsilent-autonomous-cycle.timer (15-min cadence) -- capped at PROMOTION_CANDIDATE, never auto-promoted to real files."
             if risk_score == "low" else

@@ -1,0 +1,79 @@
+{
+  "created_utc": "2026-09-01T04:50:00Z",
+  "campaign": "CANONICAL_ENGINEERING_CAPABILITY_ROUTE_REPAIR",
+  "status": "PASS",
+
+  "root_cause": {
+    "classification": "A) submit_work exposed a non-canonical task_type value",
+    "evidence": "'engineering' has never been a registered task_type in registry_data/capabilities.json (52 real distinct task_types exist across the full registry; the closest real one is 'code_edit'). evolution/advance.py._implementation_router() hardcodes studio_router.rank(\"code_edit\", ...) as the ONLY task_type it ever routes to at real execution time, regardless of what task_type a proposal recorded -- confirmed by direct grep, not inference. submit_work had zero validation/normalization of its caller-supplied task_type string against the real registry, so a natural Founder-facing label like 'engineering' silently produced a correct-but-unhelpful default-deny (0 registered candidates for a string nothing claims), even though a perfectly good real route existed under its actual name.",
+    "not_the_cause": "authority_policy, resource policy, capability registration, and the router's scoring/duty-cycle logic were all already correct and unmodified -- verified by re-running the prior campaign's canary (c8a014b5) through the real timer: it reached promotion_candidate with selected_engine=omni_engineer, provider=ollama, confirming the resource-policy hard filter and duty-cycle-among-eligible-candidates logic both work exactly as designed. The only broken layer was external-facing task_type naming."
+  },
+
+  "fix": {
+    "scope": "services/th3_mcp/tools.py and mcp_core.py ONLY -- zero changes to studio_router.py, evolution/advance.py, evolution/proposal.py, capability_registry.py, or authority_policy.py this campaign. No new task_type was registered, no worker capability was registered for anything it can't do, no protected gate was touched.",
+    "mechanism": "_normalize_task_type(): a short, explicit alias table (engineering/engineer/software_engineering/coding/code/development/dev/implementation -> code_edit) applied at the top of both submit_work and route_preview, before any rank()/classification call. Anything NOT in this explicit list passes through completely unchanged, so the existing default-deny behavior for genuinely unroutable task_type values is untouched -- verified live with task_type='quantum_computing' still producing capability_gap=true.",
+    "transparency": "Both tools now report task_type_submitted (the caller's original string) and task_type (the normalized value actually used for routing) plus task_type_was_normalized, so nothing is silently substituted without the caller being able to see it."
+  },
+
+  "phase3_resource_policy_regression": {
+    "PAID_FALSE_POLICY_REGRESSION": "PASS -- live route_preview(task_type=engineering, paid_resources_allowed=false) returns exactly ['omni_engineer_v1'] as open/accepted, zero paid providers",
+    "DUTY_CYCLE_CANNOT_OVERRIDE_RESOURCE_POLICY": "PASS -- unchanged from the prior campaign's proof (test_resource_policy.py); this campaign added no new interaction with duty-cycle logic",
+    "BEST_ELIGIBLE_BRAIN_SELECTION_PRESERVED": "PASS",
+    "MULTI_BRAIN_ROUTING_PRESERVED": "PASS"
+  },
+
+  "phase4_authority_gate_regression": {
+    "note": "No code in authority_policy.py, promotion.py, or the GATED_* constants was touched this campaign. Verified by direct diff review (git diff --cached shows only services/th3_mcp/*): credential/model-deletion/production-promotion/paid-activation/Scorpio/GPU-render gates are byte-identical to before. ARBITRARY_BASH_NOT_EXPOSED_BY_MCP and ARBITRARY_FILE_WRITE_NOT_EXPOSED_BY_MCP: still true -- the normalization function only maps strings, it has no filesystem or subprocess access.",
+    "all_gates": "PASS (unchanged)"
+  },
+
+  "phase5_preview_live_parity": {
+    "test_objective": "Create one tiny diagnostic text artifact inside the normal isolated engineering sandbox.",
+    "route_preview_task_type_engineering_paid_false_live_result": {
+      "task_type_submitted": "engineering",
+      "normalized_task_type": "code_edit",
+      "proposed_capability_id": "omni_engineer_v1",
+      "capability_gap": false,
+      "paid_provider_in_open_pool": false
+    },
+    "no_execution_occurred_this_phase": true
+  },
+
+  "phase6_live_canary": {
+    "method": "real submit_work call against the actual production endpoint, exact objective/task_type/idempotency_key from the campaign spec",
+    "work_id": "408870bb-93c4-4a56-9110-ace7e4e03a51",
+    "normalized_task_type": "code_edit",
+    "classification": "low",
+    "founder_gated": false,
+    "eligible_worker_pool_at_submission": ["omni_engineer_v1"],
+    "result": "durably_queued -- next real mrsilent-autonomous-cycle.timer trigger was ~12 minutes out at submission; not force-advanced, consistent with standing practice",
+    "not_promoted": true,
+    "corroborating_evidence_from_the_immediately_prior_canary": {
+      "work_id": "c8a014b5-7088-4440-8ccf-5d1471018d51",
+      "note": "Submitted in the previous (resource-policy) campaign, still pending at that receipt's close. Checked during this campaign: the real timer had since picked it up and it reached promotion_candidate with selected_engine=omni_engineer, provider=ollama (free/local, zero paid usage) -- live, definitive confirmation the resource-policy fix works correctly in production. Rejected just now per standing practice (evidentiary purpose served, not promoted)."
+    }
+  },
+
+  "phase7_mcp_regression": {
+    "remote_initialize": "PASS",
+    "remote_tools_list": "PASS",
+    "remote_tool_count": 15,
+    "tool_set_unchanged": true,
+    "schema_change": "submit_work and route_preview descriptions updated to mention task_type normalization; inputSchema shapes (properties/required/additionalProperties) unchanged -- no new parameter, no removed parameter",
+    "chatgpt_refresh_actions_required": false
+  },
+
+  "files_changed": [
+    "services/th3_mcp/tools.py",
+    "services/th3_mcp/mcp_core.py"
+  ],
+  "files_created": [
+    "mr_silent_spine/founder_receipts/th3_engineering_capability_route_repair_20260901.json"
+  ],
+  "other_active_session_files_touched": false,
+  "qwen_phase3_touched": false,
+  "local_model_health_py_touched": false,
+  "secret_value_ever_printed": false,
+
+  "next_step": "Check work_result(408870bb-93c4-4a56-9110-ace7e4e03a51) once the real timer has run to confirm live selected_engine=omni_engineer (expected, since claude_code is hard-excluded from the accepted pool by paid_resources_allowed=false). Reject it once confirmed, per standing practice -- do not promote."
+}
