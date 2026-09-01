@@ -137,6 +137,63 @@ TOOL_SPECS = [
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "fn": lambda args: T.continuum_status(),
     },
+    {
+        "name": "submit_work",
+        "description": "Submit a structured Studio objective. Creates exactly one Proposal in the existing self-evolution pipeline if it can be safely classified (default-deny otherwise). Never executes anything synchronously -- only the existing, already-Founder-authorized 15-minute autonomous-cycle timer ever advances it, and only if classified low-risk, capped at PROMOTION_CANDIDATE (never auto-promoted to real files). No founder_approved override exists here.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "objective": {"type": "string", "maxLength": 4000},
+                "task_type": {"type": "string", "maxLength": 100, "default": ""},
+                "context": {"type": "string", "maxLength": 4000, "default": ""},
+                "priority_hint": {"type": "string", "maxLength": 50, "default": ""},
+                "requested_capabilities": {"type": "array", "items": {"type": "string", "maxLength": 100}, "maxItems": 20, "default": []},
+                "idempotency_key": {"type": "string", "maxLength": 200},
+            },
+            "required": ["objective"],
+            "additionalProperties": False,
+        },
+        "fn": lambda args: T.submit_work(
+            args.get("objective", ""), args.get("task_type", ""), args.get("context", ""),
+            args.get("priority_hint", ""), args.get("requested_capabilities", []), args.get("idempotency_key"),
+        ),
+    },
+    {
+        "name": "work_result",
+        "description": "Read-only. Current lifecycle state of a submit_work item: objective, status, classification, latest implementation attempt (engine, validation/canary result) if any, approval state, and history. Never fabricates a result that isn't on disk.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"work_id": {"type": "string", "maxLength": 200}},
+            "required": ["work_id"],
+            "additionalProperties": False,
+        },
+        "fn": lambda args: T.work_result(args.get("work_id", "")),
+    },
+    {
+        "name": "request_founder_decision",
+        "description": "Surfaces an EXISTING Founder-gated decision point on a submit_work item in structured form (why approval is required, what decision is being asked for). Creates no second approval system and never auto-approves; read-only against the real proposal state.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "work_id": {"type": "string", "maxLength": 200},
+                "reason": {"type": "string", "maxLength": 1000, "default": ""},
+            },
+            "required": ["work_id"],
+            "additionalProperties": False,
+        },
+        "fn": lambda args: T.request_founder_decision(args.get("work_id", ""), args.get("reason", "")),
+    },
+    {
+        "name": "cancel_work",
+        "description": "Governed, idempotent cancellation -- ONLY for a submit_work item with zero implementation attempts yet (moves it to REJECTED via the existing proposal lifecycle). Reports unsupported, rather than inventing a mechanism, once an implementation attempt has started -- there is no canonical process-kill path in this project.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"work_id": {"type": "string", "maxLength": 200}},
+            "required": ["work_id"],
+            "additionalProperties": False,
+        },
+        "fn": lambda args: T.cancel_work(args.get("work_id", "")),
+    },
 ]
 
 TOOLS_BY_NAME = {t["name"]: t for t in TOOL_SPECS}

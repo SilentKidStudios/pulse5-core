@@ -1,0 +1,76 @@
+{
+  "created_utc": "2026-09-01T03:15:00Z",
+  "campaign": "CHATGPT_WORK_MR_SILENT_GOVERNED_CONTROL_PLANE (Phase 2 write/execution slice)",
+  "status": "PASS",
+
+  "architecture_decision": {
+    "question": "submit_work needed a real design decision: no existing async 'submit ad-hoc work, run it later' queue exists in mrsilent_bridge outside the self-evolution Proposal pipeline. Two options existed with materially different safety properties -- route through the existing Proposal pipeline (async, never executes synchronously, capped at PROMOTION_CANDIDATE) vs. direct synchronous execution via bridge.py/studio_router inside the HTTP handler (immediate real agent execution on every remote call).",
+    "decision_made_by": "Founder, via explicit choice before any code was written",
+    "decision": "Route through the existing Proposal pipeline (evolution/proposal.py + evolution/advance.py + the already-live, already-Founder-authorized mrsilent-autonomous-cycle.timer)"
+  },
+
+  "canonical_sources_reused_not_duplicated": {
+    "work_intake_and_queue": "mrsilent_bridge/evolution/proposal.py (Proposal.create/load/advance)",
+    "permission_classifier": "mrsilent_bridge/authority_policy.py -- GATED_KEYWORDS/GATED_TOOLS constants reused for a first-pass classification; the REAL execution engines (bridge.py/omniengineer_harness.py) independently re-run authority_policy.classify() against the actual task text before anything runs, regardless of what submit_work recorded -- verified in code (advance.py: 'every engine runs the same authority_policy.classify() on the same task text')",
+    "priority_governor": "mr_silent_spine/autonomous_exec/founder_priority_governor.py (unchanged, unrelated to this pipeline)",
+    "task_router": "mrsilent_bridge/studio_router.py (.rank(), same pure query used by route_preview)",
+    "job_ledger": "mrsilent_bridge/job_ledger.py (unchanged; only touched by the real implementation engines when a proposal is actually advanced, never by submit_work itself)",
+    "worker_brain_registry": "mrsilent_bridge/capability_registry.py",
+    "approval_system": "risk_score on the Proposal itself + PROMOTION_CANDIDATE status + promotion.py's hard, non-overridable --founder-approved requirement. No second approval object/store was created.",
+    "result_evidence_source": "Proposal.history + job_ledger records for any implementation attempt",
+    "event_wakeup_path": "mrsilent-autonomous-cycle.timer -- real, live, enabled, Founder-authorized 2026-08-17, 15-min cadence, ProtectSystem=full / ReadWritePaths locked to mrsilent_bridge only. Only ever advances risk_score=='low' proposals, and only ever as far as PROMOTION_CANDIDATE."
+  },
+
+  "new_governor_scheduler_queue_runtime_or_approval_system_created": false,
+
+  "tools_added": ["submit_work", "work_result", "request_founder_decision", "cancel_work"],
+  "tools_preserved_unchanged": ["studio_status", "priority_status", "registry_search", "request_simulation", "council_post_result", "work_status", "active_work", "route_preview", "capability_status", "runtime_health", "continuum_status"],
+  "total_tools_after": 15,
+
+  "safety_properties_verified": {
+    "submit_work_never_executes_synchronously": true,
+    "submit_work_accepts_no_founder_approved_override": true,
+    "submit_work_defaults_to_founder_gated_on_ambiguous_input": "verified live: missing task_type -> founder_gated",
+    "submit_work_defaults_to_founder_gated_on_gated_keywords": "verified live: 'delete the old credentials file and rotate the api_key' -> founder_gated (matched \\bdelete\\b, \\bcredential, \\bapi[_ ]?key\\b)",
+    "submit_work_idempotent": "verified: identical objective (or explicit idempotency_key) returns the same work_id instead of a duplicate proposal",
+    "double_gated_at_real_execution_time": "the real engines re-classify the actual task text independently -- this module's first-pass classification is defense-in-depth, not the sole gate",
+    "cancel_work_scope": "only proposals with zero implementation_attempts; reports unsupported (not invented) once an attempt has started, since no canonical process-kill path exists",
+    "no_arbitrary_shell_file_write_sql_systemd_or_credential_retrieval_exposed": true,
+    "no_promotion_possible_from_mcp": "promote requires a separate, human-run `cli.py promote --founder-approved` -- no MCP tool calls promotion.py"
+  },
+
+  "multi_brain_routing": {
+    "preserved": true,
+    "selection_path": "evolution/advance.py._implementation_router() -> studio_router.rank('code_edit', allow_founder_gated=False) -> capability-scored ranking (locality/cost/risk) over the real registry, with automatic fallback to the next accepted engine on an infra-looking failure",
+    "no_universal_claude_hardcode": true,
+    "available_brains_confirmed": ["claude_code_engineer_v1", "local_model_engineer_v1 (omni_engineer_v1, free/local via Ollama)"]
+  },
+
+  "live_canary": {
+    "method": "real submit_work + work_result calls against the actual production endpoint (https://mcp.thesilentkidstudios.com/mcp), through the same interface ChatGPT/Claude.ai use, with the current rotated bearer token",
+    "objective": "Write a one-line diagnostic README note in mrsilent_bridge/campaigns describing the ChatGPT Work governed-bridge canary run, for evidence purposes only.",
+    "work_id": "8f90f970-a6ed-4fd2-b65e-4488dd674e0d",
+    "classification": "low",
+    "result": "accepted, proposal created, work_result correctly retrieved it back over the wire",
+    "execution_state": "durably_queued (NOT force-advanced in this session -- left for the real, already-scheduled mrsilent-autonomous-cycle.timer, so no synthetic/manual execution was fabricated as a substitute for the real async path)",
+    "cleanup_note": "Four earlier LOCAL test proposals (idempotency check, gated-keyword check, missing-task_type check, and their duplicate) were explicitly rejected via cancel_work after verification so no stray test artifacts remain eligible for auto-advance. The one live remote canary above was left in place as real evidence."
+  },
+
+  "regression": {
+    "existing_11_tools_local_dispatch": "PASS",
+    "remote_tools_list_count": 15,
+    "remote_tools_list_names_match_repo": true
+  },
+
+  "files_changed": ["services/th3_mcp/tools.py", "services/th3_mcp/mcp_core.py"],
+  "files_created": ["mr_silent_spine/founder_receipts/th3_mcp_governed_execution_bridge_20260901.json"],
+  "other_active_session_files_touched": false,
+  "qwen_phase3_touched": false,
+  "local_model_health_py_touched": false,
+  "omnisim_completion_authority_touched": false,
+  "scorpio_isolation_touched": false,
+  "render_gpu_protections_touched": false,
+  "secret_value_ever_printed": false,
+
+  "next_step": "Founder refreshes TH3 Studio v2 actions in ChatGPT Work. The live canary proposal (8f90f970-...) will be picked up by the real mrsilent-autonomous-cycle.timer within 15 minutes if still eligible; check its state with work_result."
+}

@@ -2,17 +2,30 @@
 TH3S1L3NTK1D Studios MCP -- safe read-mostly tool implementations.
 
 Doctrine (enforced here, not just documented):
-  * Every tool is READ-ONLY against canonical state, except council_post_result,
-    which only ever appends a bounded signal file into the EXISTING, already-live
-    mr_silent_spine/division_signal_bus/inbox/ pipeline (consumed by the existing
-    mrsilent-division-bus-consumer.service loop). No tool here deletes, mutates
-    credentials, promotes to production, or runs arbitrary shell.
+  * Every tool is READ-ONLY against canonical state, except council_post_result
+    (appends a bounded signal file into the EXISTING, already-live
+    mr_silent_spine/division_signal_bus/inbox/ pipeline) and submit_work/
+    cancel_work, whose only write is creating/advancing one record in the
+    EXISTING mrsilent_bridge self-evolution Proposal pipeline
+    (evolution/proposal.py). No tool here deletes, mutates credentials,
+    promotes to production, or runs arbitrary shell.
   * BLEND_NOT_REPLACE: this reads/writes the SAME canonical files the rest of the
-    Studio already uses. It does not create a second registry or a second bus.
+    Studio already uses. It does not create a second registry, bus, queue,
+    governor, or approval system.
+  * submit_work NEVER executes anything synchronously in this process. It only
+    creates a Proposal; the only thing that ever advances a Proposal is the
+    already-live, already-Founder-authorized mrsilent-autonomous-cycle.timer
+    (every 15 min, and only for risk_score=="low"). Whatever risk_score this
+    module assigns, the real execution engines independently re-run
+    authority_policy.classify() against the real task text before anything
+    runs (see bridge.py/omniengineer_harness.py) -- this module's own
+    keyword/capability scan is a first-pass, defense-in-depth filter, not the
+    sole safety gate.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -30,6 +43,7 @@ import job_ledger  # noqa: E402
 import studio_router  # noqa: E402
 import capability_registry  # noqa: E402
 import authority_policy  # noqa: E402
+from evolution import proposal as proposal_mod  # noqa: E402
 STATE = ROOT / "mr_silent_spine" / "state"
 BUS_INBOX = ROOT / "mr_silent_spine" / "division_signal_bus" / "inbox"
 BUS_RECEIPTS = ROOT / "mr_silent_spine" / "division_signal_bus" / "receipts"
@@ -439,3 +453,264 @@ def continuum_status() -> dict:
         "generated_at_utc": _now(),
         "note": "Aggregation of existing canonical sources only; no new authority or truth store.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Governed execution bridge: submit_work / work_result / request_founder_decision
+# / cancel_work. All four operate ONLY on the existing self-evolution Proposal
+# pipeline (mrsilent_bridge/evolution/proposal.py + evolution/advance.py) --
+# the one real, already-live, already-Founder-authorized (2026-08-17) async
+# execution path this project has (mrsilent-autonomous-cycle.timer, every 15
+# min, auto-advances only risk_score=="low" proposals, and only ever as far
+# as PROMOTION_CANDIDATE -- real promotion always requires a separate human
+# `cli.py promote --founder-approved`). No new queue, governor, scheduler, or
+# approval system is created here.
+# ---------------------------------------------------------------------------
+
+
+def _first_pass_classify(objective: str, task_type: str, context: str, requested_capabilities: list[str]) -> tuple[str, list[str]]:
+    """Conservative, defense-in-depth first-pass risk_score for a submit_work
+    request, using the SAME gating constants authority_policy.classify() uses
+    (not a substitute for it -- the real execution engines independently
+    re-run classify() against the real task text before anything runs; this
+    only decides whether the proposal is even ELIGIBLE for the existing
+    auto-advance timer to look at). Defaults to founder_gated whenever
+    anything is ambiguous, per 'default deny if classification cannot be
+    established safely.'"""
+    combined_text = " ".join([objective or "", str(context or ""), task_type or "", " ".join(requested_capabilities)])
+
+    keyword_hits = sorted({p.pattern for p in authority_policy.GATED_KEYWORDS if p.search(combined_text)})
+    if keyword_hits:
+        return "founder_gated", [f"objective/context matched gated keyword pattern(s): {keyword_hits}"]
+
+    gated_capability_hits = sorted(set(requested_capabilities) & authority_policy.GATED_TOOLS)
+    if gated_capability_hits:
+        return "founder_gated", [f"requested capability/tool(s) always gated: {gated_capability_hits}"]
+
+    if not task_type:
+        return "founder_gated", ["no task_type supplied -- default deny on ambiguous/unclassifiable work"]
+
+    matches = studio_router.rank(task_type, allow_founder_gated=False)
+    if not any(m.accepted for m in matches):
+        return "founder_gated", [f"no eligible non-gated capability currently registered for task_type={task_type!r} -- default deny rather than guess a route"]
+
+    return "low", [f"no gated keyword/tool match; an eligible capability exists for task_type={task_type!r}"]
+
+
+def submit_work(
+    objective: str,
+    task_type: str = "",
+    context: str = "",
+    priority_hint: str = "",
+    requested_capabilities: list | None = None,
+    idempotency_key: str | None = None,
+) -> dict:
+    """Accepts a structured Studio objective and creates exactly one canonical
+    Proposal (evolution/proposal.py) if -- and only if -- a safe classification
+    can be established. Never executes anything synchronously: advancement
+    only ever happens via the existing mrsilent-autonomous-cycle.timer, and
+    only for risk_score=='low'. Does not accept and cannot be handed
+    founder_approved=True -- there is no such parameter."""
+    objective = (objective or "").strip()
+    if not objective:
+        return {"accepted": False, "reason": "objective is required", "generated_at_utc": _now()}
+
+    requested_capabilities = [str(c) for c in (requested_capabilities or [])][:20]
+
+    fingerprint_source = idempotency_key.strip() if idempotency_key else objective.lower()
+    fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()[:16]
+
+    existing = proposal_mod.find_open_by_fingerprint(fingerprint)
+    if existing is not None:
+        return {
+            "accepted": True,
+            "work_id": existing.proposal_id,
+            "classification": existing.risk_score,
+            "status": existing.status,
+            "idempotent_reuse": True,
+            "note": "An open proposal with this same objective/idempotency_key already exists; returning it instead of creating a duplicate.",
+            "generated_at_utc": _now(),
+        }
+
+    risk_score, reasons = _first_pass_classify(objective, task_type, context, requested_capabilities)
+
+    p = proposal_mod.create(
+        observed_weakness=f"[CT/ChatGPT submit_work] {objective}"[:2000],
+        proposed_upgrade=(str(context) if context else objective)[:4000],
+        risk_score=risk_score,
+        origin="ct_mcp_bridge",
+        fingerprint=fingerprint,
+    )
+
+    return {
+        "accepted": True,
+        "work_id": p.proposal_id,
+        "classification": risk_score,
+        "classification_reasons": reasons,
+        "founder_approval_required": risk_score != "low",
+        "status": p.status,
+        "routing": {"task_type": task_type or None, "requested_capabilities": requested_capabilities, "priority_hint": priority_hint or None},
+        "execution_path": (
+            "Will be auto-advanced by the existing mrsilent-autonomous-cycle.timer (15-min cadence) -- capped at PROMOTION_CANDIDATE, never auto-promoted to real files."
+            if risk_score == "low" else
+            "NOT auto-advanced (risk_score != 'low'). A human must review and advance it via the existing CLI."
+        ),
+        "idempotent_reuse": False,
+        "generated_at_utc": _now(),
+        "note": "This created a Proposal in the existing self-evolution pipeline; nothing was executed by this call. The real execution engines independently re-classify the actual task text before anything runs, regardless of the risk_score recorded here.",
+    }
+
+
+def work_result(work_id: str) -> dict:
+    """Read-only. Reports the real, current lifecycle state of a submit_work
+    proposal: objective, status, classification, latest implementation
+    attempt if any (selected engine, validation/canary result), approval
+    state, and history. Never synthesizes a result that isn't on disk."""
+    try:
+        p = proposal_mod.load(work_id)
+    except Exception:
+        return {"found": False, "work_id": work_id, "generated_at_utc": _now()}
+
+    latest_job = None
+    if p.implementation_job_ids:
+        record = job_ledger.load(p.implementation_job_ids[-1])
+        if record is not None:
+            latest_job = {
+                "job_id": record.job_id,
+                "state": record.state,
+                "selected_engine": record.selected_engine,
+                "provider": record.provider,
+                "promotion_eligible": record.promotion_eligible,
+                "validation_result": record.validation_result,
+                "canary_result": record.canary_result,
+                "terminal_result": record.terminal_result,
+                "error_class": record.error_class,
+                "updated_at": record.updated_at,
+            }
+
+    if p.status == proposal_mod.ProposalStatus.PROMOTED:
+        approval_state = "granted_and_promoted"
+    elif p.status == proposal_mod.ProposalStatus.REJECTED:
+        approval_state = "rejected"
+    elif p.risk_score != "low":
+        approval_state = "pending_founder_review"
+    else:
+        approval_state = "not_required"
+
+    return {
+        "found": True,
+        "work_id": p.proposal_id,
+        "objective": p.observed_weakness,
+        "context_or_upgrade_text": p.proposed_upgrade,
+        "classification": p.risk_score,
+        "status": p.status,
+        "approval_state": approval_state,
+        "implementation_attempts": p.implementation_attempts,
+        "implementation_job_ids": p.implementation_job_ids,
+        "latest_job": latest_job,
+        "lesson": p.lesson,
+        "deferred_until": p.deferred_until,
+        "created_at": p.created_at,
+        "history": p.history[-10:],
+        "next_canonical_step": (
+            "Awaiting the next mrsilent-autonomous-cycle.timer run (<=15 min)" if p.risk_score == "low" and p.status in (proposal_mod.ProposalStatus.OBSERVED, proposal_mod.ProposalStatus.PROPOSED)
+            else "Awaiting human review/decision (see request_founder_decision)" if p.risk_score != "low" and p.status not in proposal_mod.CLOSED_STATUSES
+            else "Awaiting human `cli.py promote --founder-approved`" if p.status == proposal_mod.ProposalStatus.PROMOTION_CANDIDATE
+            else None
+        ),
+        "source": "mrsilent_bridge.evolution.proposal + job_ledger",
+        "generated_at_utc": _now(),
+    }
+
+
+def request_founder_decision(work_id: str, reason: str = "") -> dict:
+    """Read-only surfacing of an EXISTING Founder-gated decision point on a
+    submit_work proposal -- creates no second approval system, no new file,
+    and never auto-approves. If the proposal isn't actually awaiting a
+    decision, says so honestly instead of fabricating one."""
+    try:
+        p = proposal_mod.load(work_id)
+    except Exception:
+        return {"found": False, "work_id": work_id, "generated_at_utc": _now()}
+
+    if p.status in proposal_mod.CLOSED_STATUSES:
+        return {
+            "found": True,
+            "work_id": work_id,
+            "decision_pending": False,
+            "reason": f"proposal status={p.status!r} is already closed; no decision is pending",
+            "generated_at_utc": _now(),
+        }
+
+    if p.risk_score != "low":
+        return {
+            "found": True,
+            "decision_id": p.proposal_id,
+            "work_id": p.proposal_id,
+            "decision_pending": True,
+            "protected_category": p.risk_score,
+            "requested_decision": "review and, if appropriate, manually advance this founder_gated proposal (or reject it) via the existing CLI",
+            "why_founder_approval_is_required": "risk_score != 'low' -- the existing auto-advance timer only ever picks up risk_score=='low' proposals",
+            "current_status": p.status,
+            "caller_supplied_reason": (reason or "")[:1000],
+            "evidence": {"objective": p.observed_weakness, "created_at": p.created_at},
+            "generated_at_utc": _now(),
+        }
+
+    if p.status == proposal_mod.ProposalStatus.PROMOTION_CANDIDATE:
+        return {
+            "found": True,
+            "decision_id": p.proposal_id,
+            "work_id": p.proposal_id,
+            "decision_pending": True,
+            "protected_category": "production_promotion",
+            "requested_decision": "run `cli.py promote --founder-approved` if this sandboxed, validated, canaried change should become real -- this tool cannot do that itself",
+            "why_founder_approval_is_required": "promotion.py hard-blocks any real promotion without an explicit human --founder-approved run; not overridable from here",
+            "current_status": p.status,
+            "caller_supplied_reason": (reason or "")[:1000],
+            "evidence": {"implementation_job_ids": p.implementation_job_ids},
+            "generated_at_utc": _now(),
+        }
+
+    return {
+        "found": True,
+        "work_id": p.proposal_id,
+        "decision_pending": False,
+        "reason": f"risk_score=='low' and status={p.status!r} -- this proposal does not currently need a Founder decision (it will be auto-advanced by the existing timer, or already was)",
+        "generated_at_utc": _now(),
+    }
+
+
+def cancel_work(work_id: str) -> dict:
+    """Governed cancellation, ONLY for proposals with zero implementation
+    attempts (i.e. the existing auto-advance timer has not yet started any
+    real job for it) -- moves the proposal to REJECTED via the existing
+    proposal_mod.advance() lifecycle function, the same mechanism a human
+    reviewer uses. Idempotent. Does not kill any process, PID, or systemd
+    unit, and does not touch a proposal that already has an implementation
+    attempt in flight or done -- there is no canonical safe way to interrupt
+    that, so this reports unsupported instead of inventing one."""
+    try:
+        p = proposal_mod.load(work_id)
+    except Exception:
+        return {"found": False, "work_id": work_id, "generated_at_utc": _now()}
+
+    if p.status == proposal_mod.ProposalStatus.REJECTED:
+        return {"found": True, "work_id": work_id, "cancelled": True, "status": p.status, "already_cancelled": True, "generated_at_utc": _now()}
+
+    if p.status in proposal_mod.CLOSED_STATUSES:
+        return {
+            "found": True, "work_id": work_id, "cancelled": False, "status": p.status,
+            "reason": f"status={p.status!r} is already closed and not REJECTED -- not cancellable",
+            "generated_at_utc": _now(),
+        }
+
+    if p.implementation_attempts > 0:
+        return {
+            "found": True, "work_id": work_id, "cancelled": False, "status": p.status,
+            "reason": "no canonical safe cancellation path exists once an implementation attempt has started (no process-kill mechanism in this project) -- not cancellable via this tool",
+            "generated_at_utc": _now(),
+        }
+
+    updated = proposal_mod.advance(work_id, proposal_mod.ProposalStatus.REJECTED, note="cancelled via CT/ChatGPT cancel_work (no implementation attempt had started)")
+    return {"found": True, "work_id": work_id, "cancelled": True, "status": updated.status, "already_cancelled": False, "generated_at_utc": _now()}
