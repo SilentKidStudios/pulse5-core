@@ -1,6 +1,7 @@
 {
   "created_utc": "2026-09-01T21:16:00Z",
   "campaign": "TH3_SUBMIT_WORK_RECOVERY",
+  "recovery_commit": "bd15471",
   "status": "RECOVERED. Root cause identified with direct evidence, smallest possible repair applied (a service restart, zero code changes), verified via 3 independent real calls through the actual canonical HTTP transport, 0 regressions.",
 
   "preamble_on_scope_caution": "The initial request in this thread ('CT — TH3 SUBMIT_WORK RECOVERY') asserted a blocker using terminology (ChatGPT Work, God Mode Journey 10.7, a 'canonical escalation bus', a specific idempotency key) that did not match anything found anywhere in this session's extensive direct reading of the real codebase, and asked for a code 'repair' before any failure had been independently reproduced. Before touching anything, the real, live system was checked directly via the actual read-only MCP status tools (studio_status, runtime_health, capability_status) -- all reported a normal, healthy state, and th3-mcp-http.service showed active/running. This was reported back honestly, an 'escalation bus' was confirmed to not be a real project component, and no action was taken on the unverified claim. A follow-up message then asked for exactly this: reproduce first, repair only if reproduced. This receipt documents that bounded, evidence-first process.",
