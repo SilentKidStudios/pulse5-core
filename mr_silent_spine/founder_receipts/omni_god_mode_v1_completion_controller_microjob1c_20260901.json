@@ -2,6 +2,7 @@
   "created_utc": "2026-09-01T19:04:00Z",
   "campaign": "COMPLETION_CONTROLLER_MICRO_JOB_1C_WRITE_FIRST_RETRY",
   "baseline_commit": "ac774f9",
+  "microjob1c_commit": "943fe25",
   "status": "FAIL. Real progress over the two prior attempts (the required file WAS created, as the first action, exactly as instructed, and no reference file was touched) -- but the job still fails the explicit, defined completion criteria: the required file was never rewritten with real findings and was left at status=IN_PROGRESS when finish() was called, and 2 of the 4 required source files were never read at all.",
 
   "role_boundary_respected": "Claude submitted one attempt through the real, certified omniengineer_harness.submit_job() path, independently inspected the actual sandbox file listing, the actual api_contract_report.json content, the actual turn-by-turn tool-call sequence, and the actual (unrequested) analysis.md content -- and is reporting the exact failure per this campaign's explicit instruction, not repairing the artifact or reformulating a further retry.",
