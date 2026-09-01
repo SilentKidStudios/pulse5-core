@@ -2,6 +2,7 @@
   "created_utc": "2026-09-01T19:10:30Z",
   "campaign": "COMPLETION_CONTROLLER_MICRO_JOB_1D_EXACT_FILE_CLOSE_LOOP_RETRY",
   "baseline_commit": "8453339",
+  "microjob1d_commit": "391e6d8",
   "status": "FAIL, per explicit instruction not retried further. Genuine, measurable progress on both problems 1C exposed (all 4 source files were read this time; zero extra files were created) -- but the core defect persists across a FOURTH consecutively-differently-worded attempt: the model never performs a second write_file_sandbox call on an already-created file.",
 
   "role_boundary_respected": "Claude submitted one attempt through the real, certified omniengineer_harness.submit_job() path, independently inspected the actual sandbox file listing, the actual api_contract_report.json content, and the actual turn-by-turn tool-call sequence -- and is reporting the exact failure per this campaign's explicit instruction not to retry again automatically. The artifact was not repaired by Claude.",
