@@ -1,0 +1,1379 @@
+{
+  "schema_version": 2,
+  "schema_notes": "v2 adds: canonical_name, location, division, purpose, available_actions, io_contract, health_status_method, authority_requirements, dependencies, status (active|dormant|incomplete|duplicated|placeholder|planned_not_implemented|isolated_do_not_invoke|not_found), cooperates_with. Older fields (name, provider, organ, working_scope, availability) kept for backward compatibility with capability_registry.py callers. Built from read-only discovery on 2026-08-16 \u2014 status/purpose fields are best-effort inference from filesystem/systemd/process evidence, not confirmed with each organ's owner. Phase K (2026-08-17) added omniscraper_v1/black_vault_v1/omniforge_v1 and one historical-evidence-only entry (comfyui_ct_quarantine_convention) after a whole-filesystem reconciliation search; no existing entry was modified or removed. Phase S/T (2026-08-17): registered local_static_validation_v1 (the pre-existing validation.py gate) and added test_authoring to omni_engineer_v1's task_types (evidence-based, not new capability) \u2014 closing the static_validation/test_authoring REDUNDANCY_GAP the Phase P forecast found.",
+  "entries": [
+    {
+      "capability_id": "claude_code_engineer_v1",
+      "canonical_name": "Claude Code Engineer Bridge",
+      "name": "Claude Code Engineer Bridge",
+      "location": "/opt/pulse5-core/mrsilent_bridge/bridge.py",
+      "division": "mrsilent_bridge (new, this project)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "ClaudeEngineerBridge",
+      "purpose": "Dispatch bounded, sandboxed, non-interactive Claude Code engineering jobs.",
+      "task_types": [
+        "code_edit",
+        "analysis",
+        "test_authoring",
+        "static_validation",
+        "proposal_drafting"
+      ],
+      "available_actions": [
+        "submit_job(task, tools, timeout_s, founder_approved)"
+      ],
+      "io_contract": "in: task text + tool allowlist; out: structured JobResult JSON (status, files_changed, validation, promotion_eligible)",
+      "working_scope": "isolated_sandbox_only (jobs/<job_id>/workdir); never edits pulse5-core in place",
+      "cost_class": "metered_api",
+      "risk_class": "low_by_default_escalatable",
+      "authority_requirements": "none for default tool set (Read/Grep/Glob/Edit/Write) within sandbox; founder approval for Bash/WebFetch/WebSearch/Agent/NotebookEdit or any gated path/keyword",
+      "required_approvals": "none for default tool set (Read/Grep/Glob/Edit/Write) within sandbox; founder approval for Bash/WebFetch/WebSearch/Agent/NotebookEdit or any gated path/keyword",
+      "dependencies": [
+        "claude CLI on PATH",
+        "Anthropic API auth"
+      ],
+      "health_status_method": "claude --version (local, free)",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "job exit code + changed-file diff + automatic validation.py gate + human review before promotion out of sandbox",
+      "cooperates_with": [
+        "local_model_engineer_v1",
+        "codex_engineer_v1",
+        "human_escalation_v1"
+      ],
+      "locality": "external",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "codex_engineer_v1",
+      "canonical_name": "Codex Engineer Bridge",
+      "name": "Codex Engineer Bridge",
+      "location": "/opt/pulse5-core/mrsilent_bridge/codex_bridge.py -> /opt/codex-cli/codex-x86_64-unknown-linux-musl",
+      "division": "mrsilent_bridge (new, this project)",
+      "provider": "codex_bridge.py (this project) -> /opt/codex-cli (v0.147.0, PATH: codex)",
+      "organ": "n/a",
+      "purpose": "Dispatch a single, founder-approved Codex CLI engineering job when Claude/local model aren't suitable.",
+      "task_types": [
+        "code_edit",
+        "shell_execution"
+      ],
+      "available_actions": [
+        "submit_job(task, founder_approved)"
+      ],
+      "io_contract": "in: task text (no tool allowlist possible); out: structured JobResult JSON, same shape as Claude bridge",
+      "working_scope": "isolated_sandbox_only (jobs/<job_id>/workdir), same as Claude bridge; never edits pulse5-core in place",
+      "cost_class": "metered_api (billed against the machine's already-authenticated ChatGPT account \u2014 verified live via ChatGPT tokens, not API key)",
+      "risk_class": "always_founder_gated",
+      "authority_requirements": "founder_approved=True required for EVERY invocation, unconditionally \u2014 codex has no per-tool allowlist analogous to Claude's --allowedTools; its only writable sandbox mode (workspace-write) grants shell execution as standard operation",
+      "required_approvals": "founder_approved=True required for EVERY invocation, unconditionally",
+      "dependencies": [
+        "codex CLI on PATH",
+        "authenticated ChatGPT account (already usage-limited until 2026-09-14)"
+      ],
+      "health_status_method": "codex doctor (local; do not run more than needed, its reachability check hits chatgpt.com)",
+      "status": "active",
+      "availability": "available_founder_gated",
+      "validation_method": "same automatic validation gate as Claude jobs once run; job exit code + changed-file diff + human review before promotion",
+      "note": "One real authorized job run 2026-08-16; hit account usage limit (resets 2026-09-14). Deferred proposal 97cb0071 tracks this.",
+      "cooperates_with": [
+        "claude_code_engineer_v1",
+        "human_escalation_v1"
+      ],
+      "locality": "external",
+      "quota_status": {
+        "limited": true,
+        "until": "2026-09-14T20:38:00",
+        "reason": "Account hit ChatGPT/OpenAI usage limit during the one authorized real job (2026-08-16, job 01f50726). See deferred proposal 97cb0071."
+      }
+    },
+    {
+      "capability_id": "local_model_engineer_v1",
+      "canonical_name": "Local Model Bridge (Ollama)",
+      "name": "Local Model Bridge (Ollama)",
+      "location": "/opt/pulse5-core/mrsilent_bridge/local_model_bridge.py -> http://100.105.150.104:11434",
+      "division": "mrsilent_bridge (new, this project) -> Ollama (pre-existing, discovered)",
+      "provider": "local_model_bridge.py (this project) -> Ollama server, PID 2848",
+      "organ": "n/a",
+      "purpose": "Free, local text-completion/analysis via an already-running Ollama server.",
+      "task_types": [
+        "analysis",
+        "proposal_drafting"
+      ],
+      "available_actions": [
+        "submit_job(prompt, model)"
+      ],
+      "io_contract": "in: prompt text; out: response.txt in sandbox + JobResult JSON. No file-editing tool-use loop.",
+      "working_scope": "text completion only, into isolated sandbox response.txt; no file-editing tool-use loop granted to the model",
+      "cost_class": "free (local inference, already-running server, no metering)",
+      "risk_class": "low",
+      "authority_requirements": "none for default use; same GATED_KEYWORDS task-text check as other adapters still applies",
+      "required_approvals": "none for default use",
+      "dependencies": [
+        "ollama.service (systemd, active)",
+        "Tailscale interface reachability"
+      ],
+      "health_status_method": "GET http://100.105.150.104:11434/api/tags (read-only, equivalent to `ollama list`)",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "same automatic validation gate as other adapters (validation.py)",
+      "note": "Ollama itself (systemd ollama.service) is pre-existing Studio infrastructure discovered 2026-08-16; 4 models present (qwen3-vl:8b, qwen3-coder:30b, gpt-oss:20b, qwen3.6:27b). This bridge is new (this project); the server it talks to is not.",
+      "cooperates_with": [
+        "claude_code_engineer_v1",
+        "codex_engineer_v1"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "human_escalation_v1",
+      "canonical_name": "Human / Founder Escalation",
+      "name": "Human / Founder Escalation",
+      "location": "/opt/pulse5-core/mrsilent_bridge/adapters/human_escalation_adapter.py",
+      "division": "mrsilent_bridge (new, this project)",
+      "provider": "task_router.adapters.human_escalation_adapter",
+      "organ": "n/a",
+      "purpose": "Fallback: record anything ambiguous or founder-gated for a human to review; never auto-resolves.",
+      "task_types": [
+        "anything_founder_gated_or_ambiguous"
+      ],
+      "available_actions": [
+        "run(task) -> escalation record"
+      ],
+      "io_contract": "in: task dict; out: escalation JSON in evolution/escalations/",
+      "working_scope": "writes a record to evolution/proposals/ or audit_log/ for manual review",
+      "cost_class": "free",
+      "risk_class": "n/a (this IS the gate)",
+      "authority_requirements": "always resolves TO a human, never bypasses one",
+      "required_approvals": "n/a",
+      "dependencies": [],
+      "health_status_method": "n/a (file write only)",
+      "status": "active",
+      "availability": "available (record-only). CORRECTED 2026-08-18: prior claim ('no notification channel exists \u2014 no Telegram bot or similar found anywhere on this machine') was scoped too narrowly to this codebase's own files. Broad re-search (filesystem, systemd, processes, crontab, pip packages, Claude Code settings) found NO bespoke MR. SILENT-branded Telegram bot or dedicated app anywhere accessible \u2014 that specific claim remains UNVERIFIED, not confirmed. What IS real and was previously overlooked: an ACTIVE Claude Code session (not the unattended autonomous_cycle.py, which has no tool-calling access) has a native PushNotification capability (desktop always; the Founder's phone too if Remote Control is connected) \u2014 see founder_interactive_notification_v1. A generic (unconfigured, no bot token) Telegram MCP plugin is also cached in the Claude Code plugin marketplace but not wired to this project.",
+      "validation_method": "human review",
+      "cooperates_with": [
+        "claude_code_engineer_v1",
+        "codex_engineer_v1",
+        "local_model_engineer_v1",
+        "founder_request_v1",
+        "founder_interactive_notification_v1"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "comfyui_gpu_render_server",
+      "canonical_name": "ComfyUI GPU Render Server",
+      "name": "ComfyUI GPU Render Server",
+      "location": "/opt/ComfyUI (systemd: comfyui.service), API on 127.0.0.1:8188",
+      "division": "Rendering / GPU",
+      "provider": "comfyui.service",
+      "organ": "n/a",
+      "purpose": "Executes ComfyUI image/video generation workflows (SDXL and others) on GPU.",
+      "task_types": [
+        "image_generation",
+        "video_generation"
+      ],
+      "available_actions": [
+        "standard ComfyUI HTTP API (/prompt, /queue, /system_stats, websocket progress) \u2014 inferred from open-source ComfyUI, not independently verified on this instance"
+      ],
+      "io_contract": "in: ComfyUI workflow JSON; out: rendered image/video frames + prompt_id",
+      "working_scope": "GPU-heavy; explicitly out of bounds for autonomous invocation by this bridge per project doctrine",
+      "cost_class": "gpu_compute (local GPU, no external metering, but shared/contended resource)",
+      "risk_class": "founder_gated (GPU-heavy workloads explicitly excluded from this project's scope)",
+      "authority_requirements": "not invoked by mrsilent_bridge; discovery/read-only only",
+      "required_approvals": "n/a \u2014 not integrated, GPU workloads out of scope",
+      "dependencies": [
+        "NVIDIA GPU",
+        "nvidia-persistenced.service"
+      ],
+      "health_status_method": "systemctl status comfyui.service (read-only); GET /system_stats (not exercised)",
+      "status": "active",
+      "availability": "external_not_integrated",
+      "validation_method": "n/a \u2014 not integrated",
+      "note": "Confirmed active via systemctl (comfyui.service, loaded/active/running) and listening port 8188 in `ss -ltnp`. Not entered/invoked \u2014 GPU-heavy workloads are explicitly out of bounds for this project.",
+      "cooperates_with": [
+        "render_forge_worker",
+        "omnivisual_division",
+        "pulse_api_control_plane"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "pulse_api_control_plane",
+      "canonical_name": "Pulse API Control Plane",
+      "name": "Pulse API Control Plane",
+      "location": "/opt/pulse-api/app.py (systemd: pulse-api.service), 127.0.0.1:8793",
+      "division": "Pulse Core",
+      "provider": "pulse-api.service",
+      "organ": "n/a",
+      "purpose": "A real, generic job-queue control plane: enqueue/claim/complete pattern with SQLite-backed state. render_forge_worker polls this to get render jobs.",
+      "task_types": [
+        "job_queue"
+      ],
+      "available_actions": [
+        "GET /",
+        "GET /health",
+        "GET /system_stats",
+        "POST /enqueue",
+        "POST /claim",
+        "POST /complete",
+        "GET /job/{job_id}"
+      ],
+      "io_contract": "REST/JSON over HTTP, optional X-API-Key header (dev mode allows no key), SQLite state at /opt/pulse-api/state/pulse_api.db",
+      "working_scope": "localhost-only (127.0.0.1:8793); not currently reachable/used by mrsilent_bridge",
+      "cost_class": "free (local infra)",
+      "risk_class": "unknown \u2014 not exercised; a real production-facing queue other Studio organs depend on",
+      "authority_requirements": "not invoked by mrsilent_bridge; discovery/read-only only (only read app.py's route table, did not call any endpoint)",
+      "required_approvals": "n/a \u2014 not integrated",
+      "dependencies": [
+        "SQLite state file"
+      ],
+      "health_status_method": "GET /health (not exercised by this project)",
+      "status": "active",
+      "availability": "external_not_integrated",
+      "validation_method": "n/a \u2014 not integrated",
+      "note": "This is the closest thing on this machine to a pre-existing generic task queue that the original project brief speculated about. Confirmed active via systemctl and running process (uvicorn app:app --port 8793). Endpoints read from app.py source only \u2014 no requests made to it.",
+      "cooperates_with": [
+        "pulse_worker_gpu",
+        "render_forge_worker"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "pulse_worker_gpu",
+      "canonical_name": "Pulse Worker GPU",
+      "name": "Pulse Worker GPU",
+      "location": "/opt/pulse-api/worker_gpu.py (systemd: pulse-worker-gpu.service)",
+      "division": "Pulse Core",
+      "provider": "pulse-worker-gpu.service",
+      "organ": "n/a",
+      "purpose": "GPU-side worker consuming jobs from Pulse API control plane (inferred from name/co-location; contents not read).",
+      "task_types": [
+        "gpu_job_execution"
+      ],
+      "available_actions": [
+        "unknown \u2014 not inspected"
+      ],
+      "io_contract": "unknown \u2014 not inspected",
+      "working_scope": "GPU-heavy; explicitly out of bounds for this project",
+      "cost_class": "gpu_compute",
+      "risk_class": "founder_gated (GPU-heavy)",
+      "authority_requirements": "not invoked; existence-only discovery via systemctl/ps",
+      "required_approvals": "n/a \u2014 not integrated",
+      "dependencies": [
+        "pulse_api_control_plane",
+        "GPU"
+      ],
+      "health_status_method": "systemctl status pulse-worker-gpu.service",
+      "status": "active",
+      "availability": "external_not_integrated",
+      "validation_method": "n/a",
+      "note": "Confirmed active via systemctl and a live process (pid 142241, started 2026-08-16 18:03, actively consuming CPU at time of discovery). Source file not read.",
+      "cooperates_with": [
+        "pulse_api_control_plane",
+        "comfyui_gpu_render_server"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "render_forge_worker",
+      "canonical_name": "RenderForge Worker",
+      "name": "RenderForge Worker",
+      "location": "/opt/render-forge/worker/render_worker.py (systemd: render_worker.service)",
+      "division": "Rendering / GPU",
+      "provider": "render_worker.service",
+      "organ": "n/a",
+      "purpose": "Polls Pulse Core (pulse_api_control_plane) for jobs and submits them to ComfyUI.",
+      "task_types": [
+        "render_orchestration"
+      ],
+      "available_actions": [
+        "polling loop only \u2014 no externally-callable action found"
+      ],
+      "io_contract": "polls PULSE_RENDER_HOST (default http://127.0.0.1:8000, env-overridable) every ~3s; submits to COMFY_API (default http://127.0.0.1:8188)",
+      "working_scope": "GPU-adjacent orchestration; not invoked by mrsilent_bridge",
+      "cost_class": "free (orchestration only, compute cost is in ComfyUI)",
+      "risk_class": "founder_gated (feeds GPU render pipeline)",
+      "authority_requirements": "not invoked; source read only for I/O contract",
+      "required_approvals": "n/a \u2014 not integrated",
+      "dependencies": [
+        "pulse_api_control_plane",
+        "comfyui_gpu_render_server"
+      ],
+      "health_status_method": "systemctl status render_worker.service; tail /opt/render-forge/worker/render_worker.log",
+      "status": "active",
+      "availability": "external_not_integrated",
+      "validation_method": "n/a",
+      "note": "Log file is 37MB and actively growing at time of discovery (2026-08-16 18:03) \u2014 genuinely busy, not idle.",
+      "cooperates_with": [
+        "pulse_api_control_plane",
+        "comfyui_gpu_render_server"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "render_api_divine_resources",
+      "canonical_name": "Render API (Flask) for Divine Resources",
+      "name": "Render API (Flask) for Divine Resources",
+      "location": "/opt/render_api/render_server.py (systemd: render-api.service), 0.0.0.0:5001",
+      "division": "Divine Resources",
+      "provider": "render-api.service",
+      "organ": "n/a",
+      "purpose": "Single-endpoint trigger: POST /render kicks off /opt/divine_resources/run_render.py as a subprocess.",
+      "task_types": [
+        "video_episode_generation"
+      ],
+      "available_actions": [
+        "POST /render -> {\"status\": \"render_started\"}"
+      ],
+      "io_contract": "POST with no documented body -> fire-and-forget subprocess launch, no job tracking/status endpoint",
+      "working_scope": "0.0.0.0:5001 \u2014 bound to all interfaces, not just localhost",
+      "cost_class": "free (trigger only; compute is in the subprocess it launches)",
+      "risk_class": "medium \u2014 no auth visible in the ~10-line source, bound to 0.0.0.0",
+      "authority_requirements": "not invoked; source read only",
+      "required_approvals": "n/a \u2014 not integrated",
+      "dependencies": [
+        "divine_resources (run_render.py)"
+      ],
+      "health_status_method": "none found \u2014 no /health route",
+      "status": "active",
+      "availability": "external_not_integrated",
+      "validation_method": "n/a",
+      "note": "Flagged for awareness, not action: this endpoint has no visible authentication and listens on all interfaces. Not this project's concern to fix (out of scope, no mandate to modify other Studio organs), but worth the human operator knowing.",
+      "cooperates_with": [
+        "divine_resources"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "divine_resources",
+      "canonical_name": "Divine Resources (episode factory)",
+      "name": "Divine Resources",
+      "location": "/opt/divine_resources/",
+      "division": "Divine Resources",
+      "provider": "invoked on-demand by render_api_divine_resources (subprocess)",
+      "organ": "n/a",
+      "purpose": "Builds video episodes (divine_episode_factory.py, make_episode.py, make_episode_ai.py, build_video.py, run_render.py).",
+      "task_types": [
+        "video_episode_generation"
+      ],
+      "available_actions": [
+        "run via render_api_divine_resources's POST /render, or manual script invocation"
+      ],
+      "io_contract": "unknown in detail \u2014 script names read, contents not inspected",
+      "working_scope": "not invoked by mrsilent_bridge",
+      "cost_class": "unknown",
+      "risk_class": "unknown \u2014 not inspected in depth",
+      "authority_requirements": "not invoked",
+      "required_approvals": "n/a \u2014 not integrated",
+      "dependencies": [
+        "render_api_divine_resources or manual trigger"
+      ],
+      "health_status_method": "none found \u2014 on-demand script, not a daemon",
+      "status": "dormant_between_triggers",
+      "availability": "external_not_integrated",
+      "validation_method": "n/a",
+      "cooperates_with": [
+        "render_api_divine_resources"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "render_forge_bridge",
+      "canonical_name": "Render Forge Bridge",
+      "name": "Render Forge Bridge",
+      "location": "/opt/render-forge-bridge/bridge_worker.py, render_bridge_worker.py",
+      "division": "Rendering / GPU",
+      "provider": "no systemd service found; no matching process in `ps aux`",
+      "organ": "n/a",
+      "purpose": "Inbox/outbox file-drop bridge pattern (inbox/, processed/, failed/, outputs/, workflows/) \u2014 inferred from directory names, worker not read in detail.",
+      "task_types": [
+        "render_bridge"
+      ],
+      "available_actions": [
+        "unknown \u2014 appears to be manually run or was a prior iteration, not currently scheduled"
+      ],
+      "io_contract": "file-drop: presumably watches inbox/, writes to outputs/processed/failed",
+      "working_scope": "not invoked by mrsilent_bridge",
+      "cost_class": "unknown",
+      "risk_class": "unknown",
+      "authority_requirements": "not invoked",
+      "required_approvals": "n/a \u2014 not integrated",
+      "dependencies": [],
+      "health_status_method": "none \u2014 no systemd unit, no matching running process",
+      "status": "dormant",
+      "availability": "external_not_integrated",
+      "validation_method": "n/a",
+      "note": "outputs/ contains files named mr_silent_<timestamp>.{json,mp4,png,txt} from March 2026 \u2014 'mr_silent' used here as an output-naming prefix, not evidence of a running agent. No process, no systemd unit, last file modification March 20 2026 \u2014 reads as dormant/superseded by render_forge_worker + pulse_api_control_plane, which are the currently-active render pipeline.",
+      "cooperates_with": [],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "omnivisual_division",
+      "canonical_name": "OmniVisual Division",
+      "name": "OmniVisual Division",
+      "location": "/opt/pulse5-render/omnivisual/ (~30 sub-tool directories) + /opt/pulse5-core/omniregistry (capability/doctrine/status/receipt entries)",
+      "division": "OmniVisual",
+      "provider": "extensive internal toolkit, not a single service",
+      "organ": "n/a",
+      "purpose": "Character-consistent AI visual production: identity locking, segmentation, canon enforcement, workflow diagnostics, competitive benchmarking, and an iterative 'workflow_doctor' self-improvement log spanning phases 2 through 11d.",
+      "task_types": [
+        "character_identity_lock",
+        "segmentation",
+        "canon_enforcement",
+        "workflow_diagnostics",
+        "competitive_benchmarking"
+      ],
+      "available_actions": [
+        "not enumerated per-tool \u2014 sub-components include identity_vector_engine, microvision_engine, latent_coherence_engine, segmentation_region_engine, multimodal_router, omnitile, workflow_doctor_v1, canon_registry(_v1), asset_vault_v1, lora_training_v1, and ~20 more"
+      ],
+      "io_contract": "unknown in detail \u2014 this is a toolkit/library layer invoked by the render pipeline (ComfyUI/pulse-api/render_forge), not independently interrogated",
+      "working_scope": "not invoked by mrsilent_bridge; GPU-heavy, out of scope",
+      "cost_class": "gpu_compute (via ComfyUI) + engineering time",
+      "risk_class": "founder_gated (GPU-heavy + touches character/canon IP)",
+      "authority_requirements": "not invoked; read-only directory-name-level discovery only",
+      "required_approvals": "n/a \u2014 not integrated",
+      "dependencies": [
+        "comfyui_gpu_render_server",
+        "GPU"
+      ],
+      "health_status_method": "unknown \u2014 no single health endpoint found; workflow_doctor_v1/state/latest_workflow_doctor_audit.json suggests a self-audit convention",
+      "status": "active",
+      "availability": "external_not_integrated",
+      "validation_method": "internal 'workflow_doctor' self-audit pattern (own doctrine files: region_lock_doctrine.json, strict_restoration_doctrine.json, omni_pulse_purgatory_doctrine.json \u2014 not read in detail)",
+      "note": "workflow_doctor_v1/state/mr_silent_task_packet_workflow_doctor_v1.json has owner: 'MR. SILENT / OmniVisual Workflow Doctor', mission: 'Autonomously inspect, patch, test, score, and evolve ComfyUI/Blender/n8n workflows until founder-intended result is achieved' \u2014 dated 2026-05-09, status 'installed_doctor_v1_audit_layer'. This is a pre-existing use of the name 'MR. SILENT' as an autonomous-agent role/identity for this division's self-improvement work, distinct from this project's own mrsilent_bridge and from the separately-discovered scorpio-mrsilent-autonomy.service. See ARCHITECTURE_REPORT addendum for full detail.",
+      "cooperates_with": [
+        "comfyui_gpu_render_server",
+        "omniregistry_pulse5core"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "studio_planned_roles_omniforge_blackvault_omniguard_aed_omnicompetitio",
+      "canonical_name": "OmniForge / BlackVault / OmniGuard / AED / OmniCompetitio (planned roles)",
+      "name": "OmniForge / BlackVault / OmniGuard / AED / OmniCompetitio",
+      "location": "/opt/pulse5-render/omnivisual/workflow_doctor_v1/state/omnivisual_omnicompetitio_wiring.json",
+      "division": "OmniVisual (planning artifact)",
+      "provider": "n/a \u2014 no code, script, directory, or service by any of these names exists anywhere searched",
+      "organ": "n/a",
+      "purpose": "Named ROLES in a requirements/routing table for a planned OmniVisual<->OmniCompetitio benchmarking pipeline: OmniForge='build_tools', BlackVault (with Asset Vault)='store_results', OmniGuard (with Canon Registry)='protect_assets', AED='architect_upgrades', OmniCompetitio='discover_gaps'.",
+      "task_types": [],
+      "available_actions": [],
+      "io_contract": "n/a \u2014 no implementation found",
+      "working_scope": "n/a",
+      "cost_class": "n/a",
+      "risk_class": "n/a",
+      "authority_requirements": "n/a",
+      "required_approvals": "n/a",
+      "dependencies": [],
+      "health_status_method": "n/a",
+      "status": "planned_not_implemented",
+      "availability": "not_found",
+      "validation_method": "n/a",
+      "note": "The wiring document's own status field is 'wired_as_requirement' (2026-05-09) \u2014 read as 'this is what's required', not 'this is built'. Searched by filename (find -iname) and by content (grep across .py/.json/.txt/.md/.toml/.cfg/.ini/.sh/.yaml/.yml, excluding Scorpio's Corner) across all of /opt: zero other references to any of these five names. OmniScraper (also asked about) has ZERO references anywhere, not even in planning documents \u2014 nothing was found to associate it with. Do not build integrations for these \u2014 they would be invented capability, not real ones. If the Founder confirms they should exist, that is new work, not registry reconciliation. NAME COLLISION CLARIFIED (Phase 13 gap-closure, 2026-08-18): 'OmniForge' and 'BlackVault' here are role names in OmniVisual's OWN unrelated planning document (a benchmarking pipeline for that division) \u2014 they are NOT the same as this project's own omniforge_v1 and black_vault_v1 capabilities (different division, different purpose, already actively implemented and tested in mrsilent_bridge). Do not treat one as evidence the other is built.",
+      "cooperates_with": [],
+      "locality": "n/a",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "omnisonus_clone_engine",
+      "canonical_name": "OmniSonus Clone Engine",
+      "name": "OmniSonus Clone Engine",
+      "location": "/opt/omnisonus-clone-engine/",
+      "division": "OmniSonus (voice)",
+      "provider": "no systemd service (confirmed by design \u2014 manually-run/on-demand tooling, not a background daemon)",
+      "organ": "n/a",
+      "purpose": "Voice cloning / training engine \u2014 directory structure only inspected (app/, datasets/, logs/, output/, runs/, training/, venv/, voices/); training data contents NOT read.",
+      "task_types": [
+        "voice_cloning"
+      ],
+      "available_actions": [
+        "unknown \u2014 deliberately not inspected further"
+      ],
+      "io_contract": "unknown \u2014 deliberately not inspected further",
+      "working_scope": "NOT entered beyond top-level directory listing \u2014 voice-cloning-adjacent territory, treated with the same caution as Scorpio's Corner even though it is a technically separate directory",
+      "cost_class": "unknown",
+      "risk_class": "founder_gated (voice/model territory; treated as sensitive by policy regardless of confirmed status)",
+      "authority_requirements": "not invoked; not integrated; not recommended for integration without explicit Founder direction",
+      "required_approvals": "n/a \u2014 not integrated, and this project will not propose integrating it without explicit instruction",
+      "dependencies": [
+        "mrsilent_bridge/local_audio_bridge.py reuses this venv's faster-whisper install read-only (see local_audio_transcription_v1)"
+      ],
+      "health_status_method": "not determined",
+      "status": "CORRECTED 2026-08-18 (Audio milestone): the OLD claim ('no matching live process found, likely dormant, not confirmed') was about SERVICE liveness only and is stale \u2014 this project has since directly confirmed the venv itself is real: /opt/omnisonus-clone-engine/venv has faster-whisper 1.2.1 genuinely installed and working, reused read-only via subprocess by mrsilent_bridge/local_audio_bridge.py (Founder-authorized Audio milestone, tested live in tests/test_audio_capability.py). The voice-cloning FUNCTION itself (app/, training/, voices/, output/) remains NOT inspected further and NOT integrated \u2014 this correction is scoped strictly to the venv/python-environment fact, not a change to the founder_gated caution below.",
+      "availability": "external_not_integrated",
+      "validation_method": "n/a",
+      "note": "training/mrsilent_voice_v2/mrsilent_voice_v1/ subdirectory exists \u2014 a voice-clone training dataset literally named after 'Mr. Silent'. Directory names only were observed (metadata/xtts*, transcripts/); no transcript, audio, or training file contents were opened. This is a second independent, pre-existing use of the name 'Mr. Silent' (alongside the OmniVisual workflow_doctor task-packet and the scorpio-mrsilent-autonomy.service), here as what appears to be a content persona/character with a cloned voice, not software.",
+      "cooperates_with": [
+        "local_audio_transcription_v1"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "omnisonus_nextgen",
+      "canonical_name": "OmniSonus NextGen",
+      "name": "OmniSonus NextGen",
+      "location": "/opt/omnisonus-nextgen/",
+      "division": "OmniSonus (voice)",
+      "provider": "no systemd service found; not confirmed running",
+      "organ": "n/a",
+      "purpose": "Voice engine evaluation framework \u2014 ENGINE_POLICY.txt names candidate TTS engines (CosyVoice3 primary, Chatterbox expressive, FishSpeech_S2 advanced, F5-TTS evaluation-only, XTTS_v2 legacy fallback).",
+      "task_types": [
+        "voice_engine_evaluation"
+      ],
+      "available_actions": [
+        "unknown \u2014 deliberately not inspected further"
+      ],
+      "io_contract": "unknown \u2014 deliberately not inspected further",
+      "working_scope": "top-level directory + ENGINE_POLICY.txt read only; engines/, models/, reference_audio/ NOT entered",
+      "cost_class": "unknown",
+      "risk_class": "founder_gated (voice/model territory)",
+      "authority_requirements": "not invoked; not integrated; not recommended for integration without explicit Founder direction",
+      "required_approvals": "n/a",
+      "dependencies": [],
+      "health_status_method": "not determined",
+      "status": "unknown (no systemd service, no matching live process found)",
+      "availability": "external_not_integrated",
+      "validation_method": "n/a",
+      "note": "Same caution applied as omnisonus_clone_engine: voice/model-adjacent, not entered beyond top level.",
+      "cooperates_with": [],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "scorpio_corner_cluster",
+      "canonical_name": "Scorpio's Corner (product cluster)",
+      "name": "Scorpio's Corner",
+      "location": "/opt/scorpios-corner-voice \u2014 NOT ENTERED, per explicit isolation mandate",
+      "division": "Scorpio's Corner",
+      "provider": "scorpio-app-api.service, scorpio-app-queue-worker.service, scorpio-mobile-ui.service, scorpio-mrsilent-autonomy.service",
+      "organ": "n/a",
+      "purpose": "Unknown in detail by design \u2014 an active product with its own app-generation queue and an autonomous completion controller. Purpose inferred ONLY from systemd unit descriptions, never from entering the directory.",
+      "task_types": [],
+      "available_actions": [],
+      "io_contract": "n/a \u2014 deliberately not inspected",
+      "working_scope": "ISOLATED \u2014 this project must not modify Scorpio's Corner, restart its services, or otherwise interact with it",
+      "cost_class": "unknown",
+      "risk_class": "isolated_do_not_invoke",
+      "authority_requirements": "founder-only; explicitly out of bounds for this entire project regardless of risk classification",
+      "required_approvals": "n/a \u2014 hard-excluded, not a founder-gate-and-maybe question",
+      "dependencies": [],
+      "health_status_method": "systemctl list-units (read-only; this is the ONLY inspection performed)",
+      "status": "active",
+      "availability": "isolated_do_not_invoke",
+      "validation_method": "n/a",
+      "note": "IMPORTANT: one of these four services is literally named/described 'scorpio-mrsilent-autonomy.service \u2014 MR. SILENT Scorpio Autonomous Completion Controller'. This is a REAL, currently-active, pre-existing system also using the name 'MR. SILENT', scoped specifically to Scorpio's Corner. It was discovered via `systemctl list-units` (read-only) ONLY \u2014 no systemctl cat/status details, no logs, no script contents were read, consistent with the isolation mandate. This is a naming collision with this project's own 'mrsilent_bridge', not the same system \u2014 flagged prominently for the Founder's awareness, no action taken.",
+      "cooperates_with": [],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "omnivisual_microvision_v2",
+      "canonical_name": "OmniMicroVision v2",
+      "name": "OmniMicroVision v2 (discovered, pre-existing)",
+      "location": "/opt/pulse5-core/omniregistry/",
+      "division": "OmniVisual",
+      "provider": "pulse5-core/omniregistry",
+      "organ": "OmniVisual division",
+      "purpose": "Semantic segmentation / SAM refinement / identity-safe inpainting sub-organ of OmniVisual.",
+      "task_types": [
+        "semantic_segmentation",
+        "sam_refinement",
+        "identity_safe_inpainting",
+        "drift_rejection",
+        "fallback_enhancement"
+      ],
+      "available_actions": [
+        "unknown \u2014 registry entry only, no invocation interface found"
+      ],
+      "io_contract": "unknown",
+      "working_scope": "outside mrsilent_bridge \u2014 read-only reference entry, NOT invocable by this bridge",
+      "cost_class": "unknown",
+      "risk_class": "unknown (GPU-heavy workloads are explicitly out of bounds for this project)",
+      "authority_requirements": "n/a \u2014 not integrated",
+      "required_approvals": "n/a \u2014 not integrated",
+      "dependencies": [
+        "comfyui_gpu_render_server (likely)"
+      ],
+      "health_status_method": "omniregistry/status/omnivisual_microvision_v3_status.json claims stable_operational (self-reported, not independently verified)",
+      "status": "active (self-reported)",
+      "availability": "external_not_integrated",
+      "validation_method": "n/a",
+      "note": "Discovered read-only from omniregistry/capabilities/omnivisual_microvision_v2_capability.json in Phase 0; likely a specific sub-component of the broader omnivisual_division entry above (a v2 vs v3 naming discrepancy exists between the capability file and status file \u2014 worth the Founder's attention, not resolved here).",
+      "cooperates_with": [
+        "omnivisual_division"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "omni_engineer_v1",
+      "canonical_name": "OmniEngineer (Local Coding Agent, qwen3-coder:30b)",
+      "name": "OmniEngineer (Local Coding Agent, qwen3-coder:30b)",
+      "location": "/opt/pulse5-core/mrsilent_bridge/omniengineer_harness.py + omniengineer_agent.py -> http://100.105.150.104:11434",
+      "division": "mrsilent_bridge (new, this project) -> Ollama (pre-existing, discovered)",
+      "provider": "omniengineer_harness.py / omniengineer_agent.py (this project) -> Ollama server, model qwen3-coder:30b",
+      "organ": "n/a",
+      "purpose": "Free, local, bounded ReAct-style coding-agent loop (TASK -> PLAN -> SANDBOX -> LIST/SEARCH/READ -> PATCH -> TEST -> INSPECT FAILURE -> BOUNDED RETRY -> VALIDATE -> CANARY -> PROMOTION CANDIDATE) built around qwen3-coder:30b, since Ollama's own API has no agentic tool-use harness of its own.",
+      "task_types": [
+        "code_edit",
+        "test_authoring"
+      ],
+      "available_actions": [
+        "submit_job(task, model, max_iterations, timeout_s)",
+        "submit_job_decomposed(task, model, max_iterations_per_phase, source_paths) \u2014 bounded phase-decomposed execution for complex objectives (Phase 2\u20133)",
+        "submit_job_auto(task, ...) \u2014 canonical entry point: classify_complexity() dispatches to submit_job() or submit_job_decomposed() automatically; task_router.py and evolution/advance.py both call this, not the two functions above directly (Phase 3, OMNI_GOD_MODE_V1 router integration)"
+      ],
+      "io_contract": "in: task description text; out: sandbox file changes (jobs/<id>/workdir) + JobResult JSON (turns, files_changed, validation, canary, promotion_eligible).",
+      "working_scope": "sandboxed file-editing tool loop (list_files/read_file/grep/inspect_diff/write_file_sandbox/apply_patch_sandbox/run_validator/run_command/finish/escalate), jailed to one job's own workdir. GOVERNED source_paths (explicitly authorized real files, copied into the sandbox, never edited in place) are supported at both submit_job() (since 2026-08-20) and submit_job_decomposed() (since Phase 3, with an additional default context-staging exclusion filter for noisy/historical trees) \u2014 the model still never receives real filesystem access outside its own sandbox; the only path from sandbox to a real file remains promotion.py's founder-gated promote().",
+      "cost_class": "free (local inference, already-running server, no metering)",
+      "risk_class": "low",
+      "authority_requirements": "none for default use; same GATED_KEYWORDS task-text check as other adapters still applies; run_command inside the loop is jailed to python3/bash only, same allowlist validation.py's own checks use",
+      "required_approvals": "none for default use",
+      "dependencies": [
+        "ollama.service (systemd, active)",
+        "Tailscale interface reachability",
+        "qwen3-coder:30b model present"
+      ],
+      "health_status_method": "GET http://100.105.150.104:11434/api/tags (read-only, equivalent to `ollama list`)",
+      "status": "active (v0.1, first synthetic end-to-end proof 2026-08-16 \u2014 less proven than claude_code_engineer_v1/codex_engineer_v1, which have their own mature agent harnesses)",
+      "availability": "available",
+      "validation_method": "same automatic validation gate as other adapters (validation.py), PLUS an independent CANARY re-validation pass required for promotion_eligible=True (stricter bar than other adapters, given V0.1 immaturity)",
+      "note": "Built 2026-08-16 while Claude Code was quota-limited, following the structured design plan at omni_engineer/plans/omni_engineer_v01_structured_20260816T202047Z.json. Proven twice live end-to-end (including an INSPECT FAILURE -> bounded repair via apply_patch_sandbox cycle) before being added to this registry \u2014 same 'prove it live before trusting it' practice used for local_model_engineer_v1 and codex_engineer_v1. Reuses authority_policy, validation.py, promotion.py, audit.py unmodified. Phase S/T (2026-08-17): registered test_authoring based on real evidence \u2014 41 successful omni_engineer jobs on record wrote test_*.py files as part of code_edit tasks (e.g. test_calc2.py, test_pyyaml_adapter.py); this was always true, the registry simply never claimed it.",
+      "cooperates_with": [
+        "claude_code_engineer_v1",
+        "codex_engineer_v1",
+        "local_model_engineer_v1"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    },
+    {
+      "capability_id": "omniscraper_v1",
+      "canonical_name": "OmniScraper (governed external-capability discovery)",
+      "name": "OmniScraper",
+      "location": "/opt/pulse5-core/mrsilent_bridge/omniscraper.py",
+      "division": "mrsilent_bridge (new, Phase K, 2026-08-17)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "OmniScraper",
+      "purpose": "Governed external-capability discovery: local (network-free, always-on) catalog search, plus an optional FOUNDER_GATED live mode (read-only PyPI metadata lookup, host-allowlisted, never installs/executes anything).",
+      "task_types": [
+        "external_capability_discovery"
+      ],
+      "available_actions": [
+        "discover_local(query)",
+        "discover_live(query, requested_by, founder_approved)"
+      ],
+      "io_contract": "in: free-text query; out: DiscoveryResult (candidates with metadata only, no code)",
+      "working_scope": "read-only; discover_live() network calls are limited to an explicit host allowlist (pypi.org only) and are FOUNDER_GATED exactly like Claude Code's WebFetch/WebSearch",
+      "cost_class": "free",
+      "risk_class": "low_by_default_escalatable",
+      "authority_requirements": "none for discover_local(); founder_approved=True required for discover_live()",
+      "required_approvals": "founder_approved=True for any live/network discovery",
+      "dependencies": [
+        "external_sources_catalog.json (local)",
+        "pypi.org (live mode only, allowlisted)"
+      ],
+      "health_status_method": "n/a (pure function, no service)",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "tests/test_external_evolution.py",
+      "cooperates_with": [
+        "black_vault_v1",
+        "omniforge_v1"
+      ],
+      "note": "NOT wired into studio_router._CAPABILITY_TO_ADAPTER \u2014 this is not a code_edit-shaped engine; it is invoked directly by evolution/external_evolution.py and cli.py pursue-capability. Historical reconciliation (2026-08-17): no prior implementation of anything named OmniScraper was found anywhere on this machine; this is a new, evidence-justified build, not a rewrite of anything."
+    },
+    {
+      "capability_id": "black_vault_v1",
+      "canonical_name": "Black Vault (governed quarantine/evaluation)",
+      "name": "Black Vault",
+      "location": "/opt/pulse5-core/mrsilent_bridge/black_vault.py",
+      "division": "mrsilent_bridge (new, Phase K, 2026-08-17)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "BlackVault",
+      "purpose": "Metadata-only evaluation of externally-discovered candidates (license, maintenance signals, credential-access claims, duplicate-of-existing-capability check) before any integration attempt. Never downloads, installs, imports, or executes a candidate's own code. Strongest automatic verdict is 'recommended_for_forge_review' \u2014 'approved'/'production_ready' are asserted-unreachable in code, not just documented.",
+      "task_types": [
+        "external_capability_quarantine"
+      ],
+      "available_actions": [
+        "evaluate(candidate, requested_by)",
+        "find_prior_evaluation(source_identifier)"
+      ],
+      "io_contract": "in: omniscraper.DiscoveryCandidate (as dict); out: durable QuarantineRecord JSON",
+      "working_scope": "metadata-only; writes only to mrsilent_bridge/black_vault/",
+      "cost_class": "free",
+      "risk_class": "low",
+      "authority_requirements": "none (evaluation only; never self-promotes)",
+      "required_approvals": "n/a \u2014 actual integration/promotion is separately gated (omniforge_v1, promotion.py)",
+      "dependencies": [
+        "capability_registry.py (duplicate check)"
+      ],
+      "health_status_method": "n/a (pure function, no service)",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "tests/test_external_evolution.py",
+      "cooperates_with": [
+        "omniscraper_v1",
+        "omniforge_v1"
+      ],
+      "note": "Historical reconciliation (2026-08-17): no file/directory named 'Black Vault' exists anywhere on this machine. The real historical lineage is /opt/ComfyUI/_ct_quarantine/ and /opt/ComfyUI/_ct_total_quarantine/ \u2014 see the separate 'comfyui_ct_quarantine_convention' entry below. That convention is untouched by this module: different domain (ComfyUI custom nodes specifically), manual/human-driven (no reusable code interface), owned by an unrelated live system this project has no standing authority over. This module is the new, general-purpose, MR.-SILENT-owned equivalent, built because the evidence showed the general capability was genuinely absent \u2014 not a replacement for the ComfyUI convention."
+    },
+    {
+      "capability_id": "omniforge_v1",
+      "canonical_name": "OmniForge (governed capability construction/integration)",
+      "name": "OmniForge",
+      "location": "/opt/pulse5-core/mrsilent_bridge/omniforge.py",
+      "division": "mrsilent_bridge (new, Phase K, 2026-08-17)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "OmniForge",
+      "purpose": "Turns a black_vault-recommended candidate into a Studio-native adapter by delegating code-writing to OmniEngineer (never a second execution engine, never executes the candidate's own upstream code). Mirrors evolution/advance.py's exact IMPLEMENTED->TESTED->CANARY->PROMOTION_CANDIDATE progression. Never writes directly to registry_data/capabilities.json \u2014 a new capability record still requires a human/Claude-reviewed proposal, same as every other entry in this file.",
+      "task_types": [
+        "external_capability_integration"
+      ],
+      "available_actions": [
+        "integrate(quarantine_id, requested_by)"
+      ],
+      "io_contract": "in: black_vault quarantine_id; out: IntegrationResult (job_id, proposal_id, status)",
+      "working_scope": "delegates to omniengineer_harness.submit_job() \u2014 isolated_sandbox_only, identical authority boundary to every other OmniEngineer job",
+      "cost_class": "free (local model)",
+      "risk_class": "low_by_default_escalatable",
+      "authority_requirements": "same as omni_engineer_v1 \u2014 authority_policy.classify() runs on every job",
+      "required_approvals": "none to reach PROMOTION_CANDIDATE; --founder-approved required for actual promotion",
+      "dependencies": [
+        "black_vault_v1",
+        "omniengineer_harness.py",
+        "validation.py"
+      ],
+      "health_status_method": "n/a (pure function; underlying omni_engineer_v1 health applies transitively)",
+      "status": "active (v1, first live end-to-end proof 2026-08-17: real PyPI candidate -> quarantine -> OmniEngineer build -> validation -> canary -> PROMOTION_CANDIDATE, not promoted)",
+      "availability": "available",
+      "validation_method": "tests/test_external_evolution.py + the same validation.py gate every OmniEngineer job uses",
+      "cooperates_with": [
+        "black_vault_v1",
+        "omniscraper_v1",
+        "omni_engineer_v1"
+      ],
+      "note": "Historical reconciliation (2026-08-17): confirmed planned_not_implemented in this project's own prior registry entry (see studio_planned_roles_omniforge_blackvault_omniguard_aed_omnicompetitio below) and zero implementation found anywhere on this machine. This is the first real build of that planned role."
+    },
+    {
+      "capability_id": "comfyui_ct_quarantine_convention",
+      "canonical_name": "ComfyUI '_ct_quarantine' / '_ct_total_quarantine' convention (historical, external to this project)",
+      "name": "CT Quarantine Convention",
+      "location": "/opt/ComfyUI/_ct_quarantine/, /opt/ComfyUI/_ct_total_quarantine/ (NOT under mrsilent_bridge)",
+      "division": "Rendering / GPU (ComfyUI, unrelated live production system)",
+      "provider": "pre-existing Studio operator practice, predates mrsilent_bridge",
+      "organ": "n/a \u2014 a directory convention, not a callable system",
+      "purpose": "Manual quarantine-before-trust practice for third-party ComfyUI custom nodes: discovered repos (ComfyUI-Manager, ComfyUI-Multiband, ComfyUI-Env-Manager, ComfyUI-RuiquNodes, ComfyUI_IPAdapter_plus, ComfyUI-VideoHelperSuite, comfyui-sam3) are git-cloned into these directories and held back from the live custom_nodes/ tree until a human manually restores one and verifies HTTP health (see /root/CT_*_REPORT.txt, dated 2026-05-09).",
+      "task_types": [],
+      "available_actions": [],
+      "io_contract": "n/a \u2014 no programmatic interface; restoration is a manual, human-run shell procedure",
+      "working_scope": "entirely inside /opt/ComfyUI, an unrelated live production system this project has no standing authority over",
+      "cost_class": "n/a",
+      "risk_class": "founder_gated (feeds the live GPU render pipeline, same as comfyui_gpu_render_server)",
+      "authority_requirements": "n/a \u2014 this project has never had and does not now have any authority here",
+      "required_approvals": "n/a \u2014 not invocable by mrsilent_bridge at all",
+      "dependencies": [],
+      "health_status_method": "none \u2014 discovered by filesystem inspection only, 2026-08-17, read-only, nothing extracted/executed/moved",
+      "status": "dormant",
+      "availability": "not_integrated",
+      "validation_method": "n/a",
+      "cooperates_with": [],
+      "note": "Recorded per Phase F/G discipline (register discovered state even when not integrated) and Phase K's historical-reconciliation requirement. This entry documents evidence only \u2014 mrsilent_bridge black_vault_v1/omniscraper_v1/omniforge_v1 do NOT read from, write to, or otherwise interact with these directories."
+    },
+    {
+      "capability_id": "local_static_validation_v1",
+      "canonical_name": "Local Static Validation Gate",
+      "name": "Local Static Validation Gate",
+      "location": "/opt/pulse5-core/mrsilent_bridge/validation.py",
+      "division": "mrsilent_bridge (registered Phase S, 2026-08-17 \u2014 code existed since the original build)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "ValidationGate",
+      "purpose": "Deterministic, agent-agnostic static validation: Python AST/compile check, JSON syntax+jsonschema, YAML syntax, shell syntax (bash -n), ruff lint (if installed), pytest/unittest discovery+run, changed-file protected-path/symlink-escape inspection, project-specific custom validator commands. Zero model calls, zero network calls, zero cost. Already invoked unconditionally by EVERY engine's job (bridge.py, omniengineer_harness.py, omniforge.py) \u2014 this entry makes it independently routable for a standalone 'just validate this' objective instead of only reachable via claude_code_engineer_v1.",
+      "task_types": [
+        "static_validation"
+      ],
+      "available_actions": [
+        "validate(sandbox, files_changed, config) -> ValidationResult",
+        "cli.py validate <path> (human-invoked)",
+        "evolution.advance.run_local_static_validation(target_dir, requested_by) (programmatic)"
+      ],
+      "io_contract": "in: directory path + changed-file list + optional config (expected_files/schemas/custom_validators); out: ValidationResult (passed, per-check detail, skipped list)",
+      "working_scope": "read/run-only against the given directory; every subprocess jailed to that cwd, ALLOWED_BINARIES={python3,bash} only, GATED_KEYWORDS/GATED_PATH_MARKERS enforced",
+      "cost_class": "free",
+      "risk_class": "low",
+      "authority_requirements": "none \u2014 read/run-only, no network, no installs, no destructive operations possible",
+      "required_approvals": "none",
+      "dependencies": [
+        "ast/json/subprocess (stdlib)",
+        "jsonschema (optional)",
+        "pyyaml (optional)",
+        "ruff (optional)",
+        "pytest (optional, falls back to unittest)"
+      ],
+      "health_status_method": "n/a (pure function, no service; already exercised on every engineering job in this project)",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "tests/test_local_capability_routing.py + this project's own entire existing regression suite (every job already runs it)",
+      "cooperates_with": [
+        "claude_code_engineer_v1",
+        "omni_engineer_v1",
+        "codex_engineer_v1",
+        "omniforge_v1"
+      ],
+      "note": "Registered Phase S (2026-08-17) \u2014 the code is NOT new, it has validated every single job in this project since the original build. Only the router/registry entry is new, closing a real (if inert \u2014 nothing had ever actually routed on task_type='static_validation' before this) REDUNDANCY_GAP the Phase P forecast found.",
+      "locality": "local"
+    },
+    {
+      "capability_id": "founder_request_v1",
+      "canonical_name": "Founder Request Formatting",
+      "name": "Founder Request Formatting",
+      "location": "/opt/pulse5-core/mrsilent_bridge/evolution/founder_request.py",
+      "division": "mrsilent_bridge (new, this project)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "n/a",
+      "purpose": "Human-readable framing of a Founder-required decision, deduped and updated in place, over the same durable escalation storage human_escalation_v1 already writes to \u2014 not a new notification channel.",
+      "task_types": [
+        "founder_communication"
+      ],
+      "available_actions": [
+        "request_founder_decision(subject, finding, capability_needed, reason_required, recommended_action, risk, affected, rollback_recovery)",
+        "resolve_founder_decision(escalation_id, decision, note)",
+        "list_pending_founder_requests()"
+      ],
+      "io_contract": "in: structured finding/decision fields; out: durable escalation JSON (evolution/escalations/<fingerprint>.json) with both human_readable text and the full machine-readable payload",
+      "working_scope": "writes only to evolution/escalations/; never performs the gated action itself",
+      "cost_class": "free",
+      "risk_class": "n/a (reporting layer only, no authority of its own)",
+      "authority_requirements": "none \u2014 never weakens or bypasses any existing Founder gate; resolve_founder_decision() only records what the Founder decided",
+      "required_approvals": "n/a",
+      "dependencies": [],
+      "health_status_method": "n/a (pure file-based, no service)",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "tests/test_founder_communication.py",
+      "cooperates_with": [
+        "human_escalation_v1",
+        "founder_interactive_notification_v1"
+      ],
+      "locality": "local",
+      "note": "Registered 2026-08-18, retroactively \u2014 built the same milestone this registry entry was added in. The gap of building a capability without registering it was itself a real finding corrected by Milestone A (Studio Self-Awareness)."
+    },
+    {
+      "capability_id": "founder_interactive_notification_v1",
+      "canonical_name": "Claude Code Interactive Push Notification",
+      "name": "Claude Code Interactive Push Notification",
+      "location": "native Claude Code CLI tool (PushNotification) \u2014 not code in this repository",
+      "division": "Claude Code CLI (Anthropic), not mrsilent_bridge",
+      "provider": "Claude Code CLI runtime",
+      "organ": "n/a",
+      "purpose": "Sends a desktop notification, and the Founder's phone too if Remote Control is connected, from an ACTIVE Claude Code session. Discovered 2026-08-18 correcting a stale finding that no Founder notification surface existed.",
+      "task_types": [
+        "founder_communication"
+      ],
+      "available_actions": [
+        "PushNotification(message, status=proactive) \u2014 callable only by an active agentic session, not by unattended background code"
+      ],
+      "io_contract": "in: message string (<200 chars); out: desktop notification always, phone push if Remote Control connected, or an explicit not-sent result if redundant/off/nowhere to go",
+      "working_scope": "notification only \u2014 carries no payload beyond the message text; the durable record stays in founder_request_v1/human_escalation_v1",
+      "cost_class": "free",
+      "risk_class": "n/a",
+      "authority_requirements": "none",
+      "required_approvals": "n/a",
+      "dependencies": [
+        "an ACTIVE Claude Code agentic session with this tool available \u2014 CANNOT be called from autonomous_cycle.py's unattended systemd process, which has no tool-calling access at all"
+      ],
+      "health_status_method": "n/a \u2014 tool availability is a property of the current session, not a checkable service",
+      "status": "active",
+      "availability": "available only within an active Claude Code session; NOT available to the unattended 24x7 autonomous_cycle.py \u2014 this is a real, permanent architectural limit, not a gap to be closed",
+      "validation_method": "manual \u2014 this capability was exercised to correct the stale finding this entry documents",
+      "cooperates_with": [
+        "founder_request_v1",
+        "human_escalation_v1"
+      ],
+      "locality": "external (Anthropic's Claude Code infrastructure, not this Studio's own systems)",
+      "note": "A generic (uninstalled/unconfigured \u2014 no bot token, not in active mcpServers) Telegram MCP plugin is also cached at /root/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram \u2014 available capability, not an active one. UPDATED 2026-08-18: the Founder has directly asserted @MR_S1L3NT_BOT (Telegram) and a dedicated MR. SILENT app/UI exist as intended Founder communication surfaces. Repeated broad, evidence-based local search (filesystem, systemd, processes, crontab, pip packages, Claude Code settings) still finds no bot token, config, process, or connection detail for either \u2014 but per organ_discovery.classify_capability_evidence(), a Founder's direct assertion about their own infrastructure is real evidence this runtime cannot independently overrule. Classification is INVENTORY_RUNTIME_CONTRADICTION (see telegram_app_reconciliation_v1), NOT capability-absent: the architectural fact is preserved, not erased. A single deduplicated Founder request (see evolution/founder_request.py, fingerprint 'telegram_app_reconciliation') asks for the exact missing connection detail (bot token/webhook location, or app deployment/API location) needed to actually wire this in \u2014 nothing is fabricated as connected without it."
+    },
+    {
+      "capability_id": "telegram_app_reconciliation_v1",
+      "canonical_name": "Telegram Bot / MR. SILENT App Reconciliation",
+      "name": "Telegram Bot / MR. SILENT App Reconciliation",
+      "location": "organ_discovery.classify_capability_evidence() + registry entry (this one)",
+      "division": "mrsilent_bridge (new, this project)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "n/a",
+      "purpose": "Records the INVENTORY_RUNTIME_CONTRADICTION between the Founder's direct assertion that @MR_S1L3NT_BOT (Telegram) and a dedicated MR. SILENT app/UI exist, and this runtime's own repeated, evidence-based inability to locate either. Preserves the architectural fact (Founder-asserted, not erased) while honestly reporting that local discovery cannot confirm it \u2014 never silently downgrades to 'capability absent'.",
+      "task_types": [
+        "founder_communication"
+      ],
+      "available_actions": [
+        "classify_capability_evidence(capability_name, founder_asserted, runtime_found, ...) -> classification"
+      ],
+      "io_contract": "in: assertion + search evidence; out: OPERATIONAL | INVENTORY_RUNTIME_CONTRADICTION | CAPABILITY_ABSENT",
+      "working_scope": "read-only classification + this registry entry; does not itself connect to anything",
+      "cost_class": "free",
+      "risk_class": "n/a",
+      "authority_requirements": "resolving the underlying contradiction requires Founder-supplied connection details (bot token/webhook, or app deployment/API location) \u2014 cannot be discovered, must be provided",
+      "required_approvals": "n/a",
+      "dependencies": [],
+      "health_status_method": "n/a",
+      "status": "closed_not_building",
+      "availability": "CLOSED by explicit Founder decision (2026-08-18): NOT BUILDING THIS. Exhaustive, repeated, evidence-cited discovery across many rounds (most recently a full /opt-wide sweep) confirms no MR. SILENT Telegram bot or dedicated app exists on this machine. Most plausible source of the original belief: scorpio-app-api.service / scorpio-mobile-ui.service (Scorpio's Corner's own real app/API), not MR. SILENT's. The underlying founder_request (661301d586e993eb) is resolved status=denied. Do NOT re-open this as a recurring reconciliation target in future rounds unless the Founder raises it again with new, concrete connection details.",
+      "validation_method": "tests/test_studio_self_awareness.py",
+      "cooperates_with": [
+        "founder_interactive_notification_v1",
+        "founder_request_v1",
+        "human_escalation_v1"
+      ],
+      "locality": "local"
+    },
+    {
+      "capability_id": "founder_conversation_v1",
+      "canonical_name": "Natural Founder Conversation",
+      "name": "Natural Founder Conversation",
+      "location": "/opt/pulse5-core/mrsilent_bridge/evolution/founder_conversation.py",
+      "division": "mrsilent_bridge (new, this project)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "n/a",
+      "purpose": "Bounded, deterministic pattern matching over free text, resolving to a fixed set of explicit governed intents (recent work, pending approvals, evidence, organ health, learning, approve/deny). Not an LLM call. Never infers Founder approval from casual conversation \u2014 approve/deny only resolve when exactly one request is genuinely pending; otherwise asks for clarification. EXTENDED 2026-08-19 (real Founder-device conversation test): a deterministic-pattern miss no longer dead-ends at 'use cli.py' \u2014 a new natural-language fallback (never authority-changing, no tools granted) gathers real Studio evidence from the SAME sources the deterministic intents already use and reasons over it via local_model_bridge.submit_job() (the same primitive local_video_bridge.py's own reasoning pass uses). Deterministic patterns remain the fast, unchanged first-tried path; approve/deny's unambiguous-target-only safety design is untouched.",
+      "task_types": [
+        "founder_communication"
+      ],
+      "available_actions": [
+        "resolve_intent(text) -> ResolvedIntent (classification only)",
+        "handle_intent(text, requested_by) -> ResolvedIntent (classification + execution of read-only queries; approve/deny only when unambiguous)"
+      ],
+      "io_contract": "in: free text; out: ResolvedIntent(intent, target, ambiguous, clarification_needed, answer)",
+      "working_scope": "read-only for query intents (autonomous_cycle history, evolution/proposal.py lessons, founder_request.py pending list, organ_discovery.duty_check()); approve/deny call the SAME founder_request.resolve_founder_decision() the explicit CLI path uses \u2014 no parallel authority mechanism",
+      "cost_class": "free",
+      "risk_class": "n/a \u2014 never itself grants or bypasses authority; only ever routes to the existing gated mechanism",
+      "authority_requirements": "none to query; approve/deny still go through the unchanged founder_request.py gate",
+      "required_approvals": "n/a",
+      "dependencies": [
+        "evolution/founder_request.py",
+        "autonomous_cycle.py",
+        "evolution/proposal.py",
+        "organ_discovery.py"
+      ],
+      "health_status_method": "n/a (pure function, no service)",
+      "status": "active",
+      "availability": "available (CLI: cli.py talk \"<text>\"; library: evolution.founder_conversation.handle_intent())",
+      "validation_method": "tests/test_founder_conversation.py tests/test_founder_conversation.py \u2014 6 new real, live test functions (hitting the real local reasoning model) proving the Founder's own exact real-device test sentence and 5 more example phrasings all get real grounded answers, Scorpio questions get an honest isolation answer without a model call, and multi-turn 'Why?'-style context resolution works across both deterministic and natural-language turns. 63/63 assertions pass.",
+      "cooperates_with": [
+        "founder_request_v1",
+        "founder_interactive_notification_v1",
+        "human_escalation_v1"
+      ],
+      "locality": "local"
+    },
+    {
+      "capability_id": "local_vision_analysis_v1",
+      "canonical_name": "Local Vision Analysis (qwen3-vl:8b)",
+      "name": "Local Vision Analysis (qwen3-vl:8b)",
+      "location": "/opt/pulse5-core/mrsilent_bridge/local_model_bridge.py:analyze_image()",
+      "division": "mrsilent_bridge (new, this project)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "LocalVisionBridge",
+      "purpose": "Real image-understanding capability (Omni God Mode Phase 7, Founder-authorized 2026-08-18): sends an image + prompt to qwen3-vl:8b (already installed on the same Ollama instance local_model_engineer_v1 uses for text, already correctly classified VISION_SPECIALIST and excluded from engineering failover) and returns the model's real response. Gives the pre-existing, already-installed vision model an actual role for the first time \u2014 it was previously only ever referenced as something to EXCLUDE from coding tasks, never wired to anything.",
+      "task_types": [
+        "image_understanding",
+        "vision_analysis"
+      ],
+      "available_actions": [
+        "analyze_image(image_path, prompt, requested_by, timeout_s) -> JobResult"
+      ],
+      "io_contract": "in: image file path + text prompt; out: JobResult (status, response_excerpt, model) \u2014 same shape as local_model_engineer_v1's JobResult, images= is a thin addition to the same submit_job() call path",
+      "working_scope": "read-only analysis; never writes any file the caller didn't already provide, same ANALYSIS-ONLY scope as local_model_engineer_v1",
+      "cost_class": "free",
+      "risk_class": "low",
+      "authority_requirements": "none \u2014 same authority posture as local_model_engineer_v1 (no tools/shell/file-write access granted to the model)",
+      "required_approvals": "none",
+      "dependencies": [
+        "Ollama instance at local_model_bridge.OLLAMA_BASE_URL",
+        "qwen3-vl:8b installed and classified VISION_SPECIALIST in local_model_health.MODEL_CATEGORIES (verified live at call time, never assumed)"
+      ],
+      "health_status_method": "local_model_health.check_json() (same GET /api/tags every other local-model capability already uses)",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "tests/test_vision_capability.py \u2014 real, live image analysis proof against a synthetic test image with a known, checkable answer",
+      "cooperates_with": [
+        "local_model_engineer_v1",
+        "founder_conversation_v1"
+      ],
+      "locality": "local"
+    },
+    {
+      "capability_id": "studio_health_summary_v1",
+      "canonical_name": "Unified Studio Health Summary",
+      "name": "Unified Studio Health Summary",
+      "location": "/opt/pulse5-core/mrsilent_bridge/organ_discovery.py:studio_health_summary()",
+      "division": "mrsilent_bridge (new, this project)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "StudioHealthSummary",
+      "purpose": "Omni God Mode Phase 11 (Founder-authorized 2026-08-18): a UNIFIED HEALTHY/DEGRADED/UNAVAILABLE/STALE/PARTIAL/UNKNOWN vocabulary over signals that already existed separately (organ_discovery.provider_health() for Ollama, local_model_health.circuit_status() for Provider B, organ_discovery.duty_check() for the 4 job_ledger-tracked engines). Classifies real evidence into one consistent vocabulary; adds no new checks, duplicates no existing function. Closes the gap where 'Founder, OmniForge is healthy, Ollama is healthy, Provider B is standby...' was only answerable by manually cross-referencing three separately-shaped outputs.",
+      "task_types": [
+        "observability",
+        "health_query"
+      ],
+      "available_actions": [
+        "studio_health_summary(target=None) -> unified status dict; wired into founder_conversation_v1's QUERY_ORGAN_HEALTH intent"
+      ],
+      "io_contract": "in: optional target name/substring; out: {status, reason, evidence, ...} per entry, or the full entries list when target is None. Ambiguous substrings return {ambiguous: True, matches: [...]}, never a guess.",
+      "working_scope": "read-only aggregation over existing real functions; writes nothing",
+      "cost_class": "free",
+      "risk_class": "n/a",
+      "authority_requirements": "none",
+      "required_approvals": "none",
+      "dependencies": [
+        "organ_discovery.provider_health()",
+        "organ_discovery.duty_check()",
+        "local_model_health.circuit_status()",
+        "provider_b_bridge.is_running()"
+      ],
+      "health_status_method": "n/a (this IS the health-status method for other capabilities)",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "tests/test_unified_health_status.py \u2014 real, live assertions against currently-true Studio state, no mocking",
+      "cooperates_with": [
+        "founder_conversation_v1"
+      ],
+      "locality": "local"
+    },
+    {
+      "capability_id": "local_audio_transcription_v1",
+      "canonical_name": "Local Audio Transcription (faster-whisper)",
+      "name": "Local Audio Transcription (faster-whisper)",
+      "location": "/opt/pulse5-core/mrsilent_bridge/local_audio_bridge.py:analyze_audio()",
+      "division": "mrsilent_bridge (new, this project) \u2014 reuses omnisonus-clone-engine's venv read-only",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "LocalAudioBridge",
+      "purpose": "Omni God Mode Endgame Audio milestone (Founder-authorized 2026-08-18): real local speech transcription. DISCOVERED already installed and cached on this machine before building anything new \u2014 faster-whisper 1.2.1 already importable in /opt/omnisonus-clone-engine/venv (a different division's own environment, reused read-only via subprocess, never imported into this project, never modified), and the Systran/faster-whisper-small.en model checkpoint already downloaded and cached (~464MB, zero new download). ffmpeg/ffprobe (already installed system-wide) normalize format and probe duration before the model is ever invoked, so corrupt/oversized files fail cleanly and fast.",
+      "task_types": [
+        "audio_transcription",
+        "audio_understanding"
+      ],
+      "available_actions": [
+        "analyze_audio(audio_path, language=None, task='transcribe', include_timestamps=True, include_metadata=True) -> AudioResult",
+        "health_check() -> {available, venv, model}",
+        "CLI: cli.py analyze-audio <path> [--language en]"
+      ],
+      "io_contract": "in: audio file path (.wav/.mp3/.m4a/.flac/.ogg/.webm); out: {status, source_path, detected_language, language_confidence, duration, transcript, segments, engine, model, processing_time, warnings, errors} \u2014 see local_audio_bridge.AudioResult",
+      "working_scope": "read-only analysis; never deletes/modifies the source audio file; its own internal ffmpeg-converted temp copy is always cleaned via tempfile.TemporaryDirectory",
+      "cost_class": "free",
+      "risk_class": "low",
+      "authority_requirements": "none \u2014 same authority posture as local_model_engineer_v1/local_vision_analysis_v1 (no tools/shell/file-write access granted beyond reading the source file)",
+      "required_approvals": "none",
+      "dependencies": [
+        "/opt/omnisonus-clone-engine/venv (a different division's environment \u2014 read-only reuse, never modified)",
+        "faster-whisper 1.2.1 (already installed there)",
+        "Systran/faster-whisper-small.en model checkpoint (already cached at /root/.cache/huggingface/hub/)",
+        "ffmpeg/ffprobe (system-installed)"
+      ],
+      "health_status_method": "local_audio_bridge.health_check() \u2014 confirms the reused venv/interpreter still exist and faster_whisper still imports there, before ever attempting a real transcription",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "tests/test_audio_capability.py \u2014 real, live transcription of espeak-ng-synthesized known speech (ground truth known exactly since this project generates the audio itself), plus real corrupt/missing/oversized-duration failure-path proofs",
+      "cooperates_with": [
+        "local_vision_analysis_v1",
+        "founder_conversation_v1"
+      ],
+      "locality": "local"
+    },
+    {
+      "capability_id": "local_video_analysis_v1",
+      "canonical_name": "Local Video / Moving-Media Understanding",
+      "name": "Local Video / Moving-Media Understanding",
+      "location": "/opt/pulse5-core/mrsilent_bridge/local_video_bridge.py:analyze_video()",
+      "division": "mrsilent_bridge (new, this project) \u2014 pure orchestration over existing capabilities",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "LocalVideoBridge",
+      "purpose": "Omni God Mode Endgame Video milestone (Founder-authorized 2026-08-18): real video/moving-media understanding by BLENDING the existing local_vision_analysis_v1 (qwen3-vl:8b, Phase 7) and local_audio_transcription_v1 (faster-whisper, Audio milestone) \u2014 no third inference engine created. DISCOVERY PROVED (not assumed) that Ollama's serving path for qwen3-vl:8b does not reliably distinguish multiple frames passed in one call (capabilities=['completion','vision','tools','thinking'], no 'video'; a live 2-frame test caused the model to conflate distinct colors) \u2014 so this calls analyze_image() once per bounded, adaptively-sampled frame, then a real reasoning pass (local_model_bridge.submit_job()) over the ordered observations + any transcript to answer a question, producing genuine multi-timepoint temporal understanding rather than single-frame-only analysis.",
+      "task_types": [
+        "video_understanding",
+        "temporal_reasoning",
+        "audio_video_fusion"
+      ],
+      "available_actions": [
+        "analyze_video(video_path, question=None, extract_audio=True, transcribe_audio=True, max_frames=None) -> VideoResult",
+        "CLI: cli.py analyze-video <path> [--question '...'] [--max-frames N] [--no-audio]"
+      ],
+      "io_contract": "in: video file path (.mp4/.mov/.mkv/.webm/.avi/.m4v) + optional question; out: {status, duration, container, video_codec, audio_codec, width, height, fps, frame_count, sampled_frame_count, sampled_timestamps, visual_observations, audio_transcript, audio_language, temporal_summary, overall_summary, question, answer, vision_engine, vision_model, transcription_engine, transcription_model, processing_time, warnings, errors} \u2014 see local_video_bridge.VideoResult",
+      "working_scope": "read-only analysis; never deletes/modifies the source video; internally extracted frames/audio are always cleaned via tempfile.TemporaryDirectory",
+      "cost_class": "free",
+      "risk_class": "low",
+      "authority_requirements": "none \u2014 same authority posture as local_vision_analysis_v1/local_audio_transcription_v1",
+      "required_approvals": "none",
+      "dependencies": [
+        "local_vision_analysis_v1 (reused unmodified, one real call per sampled frame)",
+        "local_audio_transcription_v1 (reused unmodified for any audio track)",
+        "cv2/OpenCV (already installed, frame extraction)",
+        "ffmpeg/ffprobe (already installed, metadata + audio-track extraction)"
+      ],
+      "health_status_method": "delegates to local_model_health.check_json() (vision) and local_audio_bridge.health_check() (audio) \u2014 both already-existing real checks, not duplicated here",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "tests/test_video_capability.py \u2014 real, live analysis of an ffmpeg-synthesized red-then-blue video with a real espeak-ng speech track; proves genuine multi-timepoint temporal distinction and real audio/video fusion, not single-frame analysis mislabeled as video understanding",
+      "cooperates_with": [
+        "local_vision_analysis_v1",
+        "local_audio_transcription_v1",
+        "founder_conversation_v1"
+      ],
+      "locality": "local"
+    },
+    {
+      "capability_id": "provider_b_llamacpp_v1",
+      "canonical_name": "Provider B (independent llama-server, cross-provider failover)",
+      "name": "Provider B (independent llama-server, cross-provider failover)",
+      "location": "/opt/pulse5-core/mrsilent_bridge/provider_b_bridge.py",
+      "division": "mrsilent_bridge (new, this project)",
+      "provider": "mrsilent_bridge (this project) \u2014 reuses Ollama's own on-disk GGUF blobs, read-only",
+      "organ": "ProviderBBridge",
+      "purpose": "A genuinely independent local inference provider (SINGLE_PROVIDER_DEPENDENCY resilience, Founder-authorized 2026-08-18) \u2014 a separate llama-server process, not dependent on the `ollama serve` daemon, used as a failover-of-last-resort when Ollama itself is unavailable. Never had its own registry entry until the Idle-Reclaim milestone (2026-08-18) found and fixed a real gap in its lifecycle: idle-reclaim already existed and was wired into autonomous_cycle.py, but a live incident showed an idle instance holding ~10.3GB RAM for 1387s (under the old 1800s threshold), genuinely starving a concurrent real-model test. Fixed: threshold lowered to 600s (still generous relative to its ~90s restart cost), made configurable via MRSILENT_PROVIDER_B_IDLE_RECLAIM_S, and reclaim now has an EXPLICIT guard (has_active_generation(), self-healing marker files) against stopping mid-request \u2014 previously only an implicit timing coincidence.",
+      "task_types": [
+        "code_edit",
+        "failover_inference"
+      ],
+      "available_actions": [
+        "ensure_running(model) -> HealthStatus (idempotent on-demand start)",
+        "generate(prompt, model, json_schema=None) -> str (real inference call)",
+        "reclaim_if_idle(idle_threshold_s=None) -> bool (safe automatic stop, env-configurable threshold, refuses if a real generation is in flight)",
+        "shutdown() -> bool (explicit stop, used for reclaim and test cleanup)",
+        "is_running() / health() / idle_seconds() / has_active_generation() \u2014 real, read-only status"
+      ],
+      "io_contract": "in: prompt + model + optional json_schema; out: raw text completion via an OpenAI-compatible /v1/chat/completions endpoint on 127.0.0.1:8090",
+      "working_scope": "runs as a plain background subprocess owned by whichever MR. SILENT process starts it \u2014 no systemd unit, no new scheduler; CPU-only (-ngl 0) so it never contends with Ollama's GPU usage",
+      "cost_class": "free",
+      "risk_class": "low",
+      "authority_requirements": "none \u2014 internal resilience infrastructure, not directly Founder-invoked",
+      "required_approvals": "none",
+      "dependencies": [
+        "/usr/local/lib/ollama/llama-server (the real llama.cpp binary Ollama itself bundles)",
+        "Ollama's own on-disk GGUF model blobs, read-only, resolved fresh from Ollama's manifest every start (never hardcoded, never copied/modified \u2014 MODEL_PROTECTION_INTACT)"
+      ],
+      "health_status_method": "provider_b_bridge.health() \u2014 real GET /health, same fail-fast pattern local_model_health.check() uses for Ollama",
+      "status": "active",
+      "availability": "on-demand only \u2014 not running by design when idle; this is the correct resting state, not a fault",
+      "validation_method": "tests/test_cross_provider_failover.py (real failover + lifecycle proof) and tests/test_provider_b_idle_reclaim.py (real idle-reclaim, race-protection, self-healing, restart-after-reclaim, zombie-free-shutdown proof)",
+      "cooperates_with": [
+        "local_model_engineer_v1",
+        "omni_engineer_v1"
+      ],
+      "locality": "local"
+    },
+    {
+      "capability_id": "live_sensor_input_v1",
+      "canonical_name": "Live Sensor Input Architecture + Governance",
+      "name": "Live Sensor Input Architecture + Governance",
+      "location": "/opt/pulse5-core/mrsilent_bridge/live_sensor_governance.py + live_sensor_bridge.py + live_sensor_api.py (real HTTP transport, Real Device Sensor Bridge milestone) + live_sensor_client.html (browser client)",
+      "division": "mrsilent_bridge (new, this project)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "LiveSensorGovernance / LiveSensorBridge",
+      "purpose": "Live Sensor Input Architecture + Governance milestone (explicit Founder authorization, 2026-08-18: 'YES \u2014 MR. SILENT is authorized to eventually support live microphone and live camera input'). DISCOVERY FIRST: this server is a headless cloud droplet with NO physical audio/video capture hardware (confirmed: no /dev/video*, no ALSA capture devices, arecord/pactl/v4l2-ctl not installed) \u2014 'live sensor input' therefore means RECEIVING chunked audio/video from an authorized client over the network, not local device access. Implements the Founder's own sensor-access law directly: EXPLICIT (a session exists only because a caller explicitly created one), PERMISSIONED (founder_approved=True required, no implicit grant), DEVICE-CONTROLLED (every session names its claimed client device_id), BOUNDED (auto-expires, default/max 300s, never open-ended), OBSERVABLE (every create/chunk/end/revoke durably audited), REVOCABLE (revoke_session()/revoke_all_sessions() \u2014 an immediate kill switch). The bridge layer routes reconstructed chunked recordings through the EXISTING, unmodified local_audio_transcription_v1 and local_video_analysis_v1 capabilities \u2014 no third analysis engine. REAL DEVICE SENSOR BRIDGE milestone (2026-08-18): the server-side API is now real and network-reachable. DISCOVERY found the Founder's own Android phone (amoss-s25-ultra) already enrolled on this Studio's Tailscale network, and Scorpio's Corner already uses `tailscale serve` to expose its own app_api securely (tailnet-only HTTPS, real TLS cert, no public internet exposure) \u2014 this milestone adds an ADDITIVE, separate tailscale serve mapping (port 8443, verified not to touch Scorpio's Corner's own 443/8780 mappings) for MR. SILENT's own live_sensor_api.py (a stdlib http.server, bound to 127.0.0.1 only, bearer-token authenticated, running under a new mrsilent-live-sensor-api.service systemd unit). A live browser client (live_sensor_client.html) is served at the same origin.",
+      "task_types": [
+        "live_audio_ingestion",
+        "live_video_ingestion",
+        "sensor_governance"
+      ],
+      "available_actions": [
+        "live_sensor_governance.create_session(requested_by, reason, device_id, scope, duration_s, founder_approved) -> SensorSession",
+        "live_sensor_governance.revoke_session(session_id, ...) / revoke_all_sessions(...) -> kill switch",
+        "live_sensor_governance.list_active_sessions() -> real-time observability",
+        "live_sensor_bridge.ingest_chunk(session_id, modality, chunk_bytes, chunk_index) -> gated chunk acceptance",
+        "live_sensor_bridge.finalize_session(session_id, question=None) -> routes to analyze_audio()/analyze_video()",
+        "HTTP: POST /session, POST /session/{id}/chunk/{modality}/{index}, POST /session/{id}/finalize, POST /session/{id}/end, POST /session/{id}/revoke, POST /revoke-all, GET /session/{id}/status, GET /sessions/active, GET /health \u2014 all bearer-token authenticated except /health"
+      ],
+      "io_contract": "in: session lifecycle calls + raw audio/video byte chunks; out: SensorSession records + (on finalize) the SAME AudioResult/VideoResult shapes local_audio_transcription_v1/local_video_analysis_v1 already produce",
+      "working_scope": "session-scoped chunk buffering only; buffers cleaned up after successful finalization; never touches any physical device (none exists on this server) \u2014 governs RECEPTION of client-captured data, not capture itself",
+      "cost_class": "free",
+      "risk_class": "founder_gated \u2014 every session requires explicit founder_approved=True, no exceptions",
+      "authority_requirements": "founder_approved=True required for every session; the Real Device Sensor Bridge is Founder-authorized and Founder-verified end-to-end on a real device (2026-08-19).",
+      "required_approvals": "founder_approved=True per session (enforced in code, not merely documented)",
+      "dependencies": [
+        "local_audio_transcription_v1 (reused unmodified for finalized audio sessions)",
+        "local_video_analysis_v1 (reused unmodified for finalized video sessions)",
+        "audit.py (the same durable audit trail every other organ in this project already writes to)",
+        "live_sensor_api.py (mrsilent-live-sensor-api.service, 127.0.0.1:8794) + tailscale serve (port 8443, tailnet-only HTTPS, real TLS cert)"
+      ],
+      "health_status_method": "n/a \u2014 session-based, not a running service; live_sensor_governance.list_active_sessions() gives real-time state",
+      "status": "active \u2014 FOUNDER_VERIFIED end-to-end on the Founder's real Samsung S25 Ultra (2026-08-19): real microphone capture+transcription, real front-camera capture+preview+vision-analysis, real rear-camera capture+preview+vision-analysis, and real front/rear camera switching all confirmed PASS by the Founder in person over the real tailnet HTTPS endpoint. Architecture, governance, real network transport, AND real physical-device sensor capture are now all proven live \u2014 no longer architecture-only.",
+      "availability": "available \u2014 real, live, network-reachable, exercised by the Founder's own real physical microphone and camera (2026-08-19), AND now with real automated proof of audio+video fusion (scope='both') and revoke-during-an-active-video-session at the governance/bridge/HTTP layers (2026-08-19 gap-closure round). Not yet exercised on the real device specifically: fusion, phone-side revoke during an active camera stream, and a genuine dropped-connection/reconnect \u2014 all three now have real automated proof of their non-real-device halves; the real-device halves are honestly disclosed as open, not fabricated.",
+      "validation_method": "tests/test_live_sensor_governance.py \u2014 real, live proof: explicit-approval/reason/device gates, duration bounding, auto-expiry, revocation (single + all), max-concurrent-session bound, scope enforcement, byte-bound enforcement, and a genuine end-to-end real chunked-audio reconstruction + transcription proof (real webm audio split into real byte chunks, reassembled, transcribed via the existing pipeline); tests/test_live_sensor_api.py \u2014 23 real, live HTTP assertions against the real systemd-managed service, including a real chunked-audio-over-HTTP transcription proof and a real tailnet HTTPS reachability proof tests/js/live_sensor_client_logic.test.js \u2014 19 real Node.js assertions against the actual camera-preview/selection/switching client code. tests/js/live_sensor_client_camera_switch.test.js \u2014 20 real Node.js assertions proving the old camera track/recorder is released BEFORE the replacement is requested (the real root-cause fix for a rear-camera/switch-camera bug the Founder found on the real device and that was fixed and then Founder-reverified). tests/test_live_sensor_client_ui.py \u2014 11 real assertions against the actual served HTML. Phase 13 gap-closure round (2026-08-19): tests/test_live_sensor_governance.py::test_real_audio_and_video_fusion_in_one_scope_both_session() and tests/test_live_sensor_api.py::test_real_audio_and_video_fusion_via_http_scope_both() \u2014 real, live proof that scope='both' genuinely produces both a real transcript AND real vision observations from one finalize call, at both the governance layer and the exact HTTP path a phone session takes (previously a valid-but-never-exercised scope value). tests/test_live_sensor_governance.py::test_revoke_immediately_stops_an_active_video_session_mid_chunk() and tests/test_live_sensor_api.py::test_revoke_all_via_http_during_an_active_video_session() \u2014 real proof that revoke-all genuinely stops an in-progress VIDEO session (previously only proven for audio). tests/js/live_sensor_client_network_resilience.test.js \u2014 6 real assertions proving the client's chunk-retry-on-disconnect logic against the actual function.",
+      "cooperates_with": [
+        "local_audio_transcription_v1",
+        "local_video_analysis_v1",
+        "studio_health_summary_v1"
+      ],
+      "locality": "local"
+    },
+    {
+      "capability_id": "mrsilent_app_v1",
+      "canonical_name": "MR. SILENT App \u2014 Unified Founder Interface (first vertical slice)",
+      "name": "MR. SILENT App \u2014 Unified Founder Interface (first vertical slice)",
+      "location": "/opt/pulse5-core/mrsilent_bridge/mrsilent_app.html (client) + live_sensor_api.py's new GET /app and POST /chat routes (same service as live_sensor_input_v1, port 8794)",
+      "division": "mrsilent_bridge (this project)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "MrSilentApp",
+      "purpose": "First vertical slice of the Founder-authorized 'MR. SILENT App \u2014 Unified Founder Interface' mission (2026-08-19). Reality audit before building: NO MR. SILENT conversational app/UI existed anywhere on this machine (confirmed via a fresh, live filesystem/port/systemd sweep, not assumed) \u2014 the only prior HTML surface was live_sensor_client.html (sensor-only, no conversation). This slice adds a THIN new presentation layer with ZERO new intelligence: POST /chat calls the exact same evolution.founder_conversation.handle_intent()/format_response() pair cli.py already used, and voice input reuses the EXISTING live_sensor_governance/live_sensor_bridge audio session mechanism end-to-end (no second microphone backend) \u2014 a real recorded utterance is transcribed via the unmodified local_audio_bridge pipeline and the real transcript is fed into the same /chat a typed message uses. live_sensor_client.html and every one of its own separately Founder-verified paths (mic/front-camera/rear-camera/switching/revoke) are completely untouched by this addition.",
+      "task_types": [
+        "camera_in_conversation",
+        "founder_conversation",
+        "voice_to_chat",
+        "founder_approvals_ui"
+      ],
+      "available_actions": [
+        "GET /app \u2014 serves the unified conversation UI (no auth required to load, matching the existing / page's own pattern)",
+        "POST /chat {text} -> {intent, target, ambiguous, clarification_needed, answer, response_text} \u2014 bearer-token authenticated",
+        "Voice: POST /session (scope=audio) -> chunk upload -> POST /session/{id}/finalize (reuses live_sensor_input_v1 exactly) -> real transcript fed into POST /chat",
+        "GET /pending-requests -> real structured pending Founder requests (same data /chat QUERY_PENDING_REQUESTS returns)",
+        "POST /approve/{escalation_id} / POST /deny/{escalation_id} -> explicit, ID-targeted resolution via the real founder_request.resolve_founder_decision()",
+        "GET /studio-status -> real, computed-fresh Studio status (latest cycle, recent-window breakdown, pending-approvals count)"
+      ],
+      "io_contract": "in: typed text OR a real recorded utterance; out: the SAME ResolvedIntent-shaped structured answer + real prose founder_conversation.format_response() already produces via the CLI",
+      "working_scope": "text+voice conversation only, this round (camera analysis explicitly deferred to a later slice per the Founder's own phased sequencing \u2014 'do not build both from scratch')",
+      "cost_class": "free",
+      "risk_class": "low \u2014 read-mostly (query intents) with a narrow, already-governed authority-changing path (approve/deny) inherited unchanged from founder_conversation.py's own existing unambiguous-target-only design",
+      "authority_requirements": "bearer token required for /chat (same token as every other endpoint on this service); founder_conversation.py's own approve/deny intents still refuse to guess an ambiguous target \u2014 unchanged, not weakened",
+      "required_approvals": "none beyond the existing bearer token gate \u2014 this slice adds no new authority-changing capability beyond what founder_conversation.py already governs",
+      "dependencies": [
+        "local_vision_analysis_v1 (via live_sensor_bridge.finalize_session question= passthrough, reused unmodified)",
+        "live_sensor_governance.py + live_sensor_bridge.py (reused unmodified, for voice input)",
+        "local_audio_transcription_v1 (reused unmodified, via the existing live sensor pipeline)",
+        "live_sensor_api.py (mrsilent-live-sensor-api.service, 127.0.0.1:8794) + tailscale serve (port 8443, tailnet-only HTTPS)",
+        "evolution/founder_conversation.py (reused unmodified)"
+      ],
+      "health_status_method": "n/a \u2014 stateless request/response; GET /health on the same service gives real-time liveness",
+      "status": "active \u2014 first vertical slice (text + voice conversation) proven live end-to-end, now backed by grounded natural-language conversation (not just a narrow deterministic parser), including a real synthetic-speech-to-real-transcript-to-real-answer round trip; NOT yet exercised on the Founder's real device Camera-in-conversation added 2026-08-19: explicit camera activation + Ask-about-camera action route real vision Q&A into the SAME conversation feed, with the answer remembered for later text follow-ups.",
+      "availability": "available \u2014 real, live, network-reachable via the same tailnet-only HTTPS endpoint as live_sensor_input_v1. Real-device (phone) confirmation of the conversation flow is the remaining open item, not yet claimed.",
+      "validation_method": "tests/test_mrsilent_app_api.py \u2014 22 real, live assertions: /app served and genuinely distinct from the unmodified /; /chat auth/validation; three real founder_conversation intents (organ health, unrecognized, recent work) correctly resolved through the new HTTP path with real prose responses; a full real end-to-end voice pipeline (espeak-ng speech -> real chunked HTTP audio session -> real finalize/transcription -> the real transcript fed into /chat exactly as the app's own JS would -> the real correct answer), including an honest, non-fabricated tolerance for real speech-recognition variance (synthetic 'Ollama' pronunciation transcribing as 'llama', with the real downstream fuzzy resolution still correctly reaching real Ollama health data).",
+      "cooperates_with": [
+        "founder_conversation_v1",
+        "live_sensor_input_v1",
+        "local_audio_transcription_v1"
+      ],
+      "locality": "local"
+    },
+    {
+      "capability_id": "omni_device_lab_v1",
+      "canonical_name": "Omni Device Lab",
+      "name": "Omni Device Lab",
+      "location": "/opt/pulse5-core/mrsilent_bridge/omni_device_lab/",
+      "division": "mrsilent_bridge (new, this project)",
+      "provider": "mrsilent_bridge (this project)",
+      "organ": "OmniDeviceLab",
+      "purpose": "Governed cross-platform certification fabric: installs/launches/exercises real builds on real emulators/VMs/browsers, captures bounded failure evidence, dispatches governed repair, and retests until certified or a genuine Founder/physical-device gate is hit.",
+      "task_types": [
+        "device_certification",
+        "ui_regression",
+        "conversation_persistence_verification",
+        "media_pipeline_verification",
+        "network_resilience_verification"
+      ],
+      "available_actions": [
+        "orchestrator.run_android_certification(apk_path, profile_name, test_suite)",
+        "registry.list_runs(platform, status)",
+        "registry.latest_run(platform)"
+      ],
+      "io_contract": "in: build artifact path + device profile + test suite; out: durable CertificationRun JSON (status, steps, evidence_paths, repair_job_ids, final_status)",
+      "working_scope": "omni_device_lab_runtime/runs/<run_id>/ (durable evidence + run record); real AVDs under the existing Android SDK install; never touches production delivery routes directly",
+      "cost_class": "free (local emulator/VM compute only; no paid device-farm/cloud service)",
+      "risk_class": "low_by_default_escalatable",
+      "authority_requirements": "none to run certification/evidence capture; founder approval required for any dispatched repair job exactly as omniengineer_harness.submit_job() already requires",
+      "required_approvals": "same as omniengineer_harness.submit_job() for any dispatched repair",
+      "dependencies": [
+        "Android SDK (cmdline-tools/platform-tools/emulator) on pulse5-core-01",
+        "KVM + nested virtualization",
+        "omniengineer_harness.submit_job for repair dispatch"
+      ],
+      "health_status_method": "registry.list_runs() non-empty + adb/emulator binaries present on PATH",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "test_omni_device_lab.py known-bad/known-good fixture proof + real durable run records",
+      "cooperates_with": [
+        "claude_code_engineer_v1",
+        "codex_engineer_v1"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "until": null,
+        "reason": null
+      }
+    }
+  ]
+}

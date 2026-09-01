@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -133,6 +134,145 @@ PLAN_TIMEOUT_S = 60
 # same task is unlikely to help and burns another full iteration budget).
 RETRYABLE_FINAL_ACTIONS = frozenset({"iteration_ceiling_reached", "model_unavailable", "error", "timeout"})
 
+# ---- COMPLEXITY CLASSIFICATION (OMNI_GOD_MODE_V1 Phase 3) -----------------
+# Deterministic, bounded, fail-conservative: a task is only decomposition-
+# eligible when at least two INDEPENDENT structural signal categories fire.
+# Length alone, or a single stray keyword, is never enough — a one-file edit
+# must not be unnecessarily decomposed. This lives inside the Omni capability
+# boundary (this module), not in task_router.py or evolution/advance.py, so
+# every caller of submit_job_auto() gets the identical decision with zero
+# duplicated logic and no new router.
+_COMPLEXITY_STAGE_KEYWORDS = re.compile(
+    r"\b(inspect|design|implement|test|repair|validate|refactor|migrate)\b", re.IGNORECASE)
+_COMPLEXITY_FILE_MENTION = re.compile(
+    r"\b[\w][\w\-./]*\.(?:py|js|ts|tsx|jsx|json|md|ya?ml|sh)\b")
+_COMPLEXITY_PHASE_MARKER = re.compile(r"\bPHASE\s+\d+\b", re.IGNORECASE)
+
+COMPLEXITY_LENGTH_THRESHOLD = 1200  # chars — a weak signal, only counts combined with a real structural one
+COMPLEXITY_MIN_STAGE_KEYWORDS = 3
+COMPLEXITY_MIN_FILE_MENTIONS = 2
+COMPLEXITY_MIN_PHASE_MARKERS = 2
+COMPLEXITY_MIN_SIGNAL_CATEGORIES = 2  # fail conservative: need >=2 independent categories, not just one
+
+
+@dataclass
+class ComplexityDecision:
+    decomposition_eligible: bool
+    reasons: list[str]
+    signals: dict[str, Any]
+
+
+def classify_complexity(task: str) -> ComplexityDecision:
+    """Bounded structural classifier — no model call, no vague 'model
+    preference', pure deterministic text analysis of the task description
+    itself. See module-level comment above for the fail-conservative rule."""
+    stage_hits = sorted({m.group(1).lower() for m in _COMPLEXITY_STAGE_KEYWORDS.finditer(task)})
+    file_hits = sorted({m.group(0) for m in _COMPLEXITY_FILE_MENTION.finditer(task)})
+    phase_markers = len(_COMPLEXITY_PHASE_MARKER.findall(task))
+    length = len(task)
+
+    signals: dict[str, Any] = {
+        "length": length,
+        "distinct_stage_keywords": stage_hits,
+        "distinct_file_mentions": file_hits,
+        "explicit_phase_markers": phase_markers,
+    }
+
+    categories = 0
+    reasons: list[str] = []
+    if len(stage_hits) >= COMPLEXITY_MIN_STAGE_KEYWORDS:
+        categories += 1
+        reasons.append(f"{len(stage_hits)} distinct stage keywords {stage_hits} (>= {COMPLEXITY_MIN_STAGE_KEYWORDS})")
+    if len(file_hits) >= COMPLEXITY_MIN_FILE_MENTIONS:
+        categories += 1
+        reasons.append(f"{len(file_hits)} distinct file/module mentions (>= {COMPLEXITY_MIN_FILE_MENTIONS})")
+    if phase_markers >= COMPLEXITY_MIN_PHASE_MARKERS:
+        categories += 1
+        reasons.append(f"{phase_markers} explicit multi-stage phase markers (>= {COMPLEXITY_MIN_PHASE_MARKERS})")
+    if length >= COMPLEXITY_LENGTH_THRESHOLD and (stage_hits or file_hits):
+        categories += 1
+        reasons.append(f"task length {length} chars (>= {COMPLEXITY_LENGTH_THRESHOLD}) combined with a real structural signal")
+
+    eligible = categories >= COMPLEXITY_MIN_SIGNAL_CATEGORIES
+    if not eligible:
+        reasons.append(f"only {categories}/{COMPLEXITY_MIN_SIGNAL_CATEGORIES} independent signal categor(y/ies) fired "
+                        f"— classified simple by default (fail-conservative)")
+    return ComplexityDecision(decomposition_eligible=eligible, reasons=reasons, signals=signals)
+
+
+# ---- ADAPTIVE RETRY MATRIX (OMNI_GOD_MODE_V1 Phase 3, all 9 classes) ------
+# A documented, testable ledger of every failure class's bounded strategy.
+# The actual mechanisms live in _run_phase()/_execute()/submit_job_decomposed()
+# below (RETRYABLE_FINAL_ACTIONS, model/provider failover, repair cycles,
+# context narrowing, no-progress detection) — this dict is the single place
+# that names all 9 explicitly so none can silently go undocumented. Kept in
+# sync by test_omniengineer.py::test_adaptive_retry_matrix_covers_all_nine.
+ADAPTIVE_RETRY_MATRIX: dict[str, dict[str, str]] = {
+    "TOOL_SCHEMA_FAILURE": {
+        "DETECTION": "omniengineer_agent's tool-call parser rejects a malformed/unknown tool call from the model",
+        "RECOVERY_STRATEGY": "Phase 1 repair layer: the malformed call is fed back to the SAME model as a structured correction prompt on the next iteration, never silently dropped",
+        "MAX_RETRIES": "bounded by the phase/job's own max_iterations ceiling — no separate unbounded retry loop",
+        "FAIL_CLOSED_CONDITION": "iteration ceiling reached with the schema still malformed -> iteration_ceiling_reached (RETRYABLE_FINAL_ACTIONS), never silently treated as success",
+        "ESCALATION_CONDITION": "iteration_ceiling_reached after schema-repair attempts triggers model failover exactly like any other retryable outcome",
+    },
+    "ITERATION_STALL": {
+        "DETECTION": "a phase/job hits its max_iterations ceiling without calling finish or escalate",
+        "RECOVERY_STRATEGY": "bounded per-phase max_iterations (default 6, vs the historical 18-iteration monolith) + failover to the next REAL installed model rather than re-prompting the same one",
+        "MAX_RETRIES": "len(local_model_health.engineering_failover_order()) real installed candidates, minus already-attempted",
+        "FAIL_CLOSED_CONDITION": "candidate list exhausted with no finish -> phase/job outcome recorded as its last attempt's final_action, never upgraded to success",
+        "ESCALATION_CONDITION": "no candidates left and no time budget remaining -> falls through to provider/engine escalation",
+    },
+    "VALIDATION_FAILURE": {
+        "DETECTION": "validation.validate() (deterministic, not model-judged) returns passed=False after the base inspect/implement/test phases",
+        "RECOVERY_STRATEGY": "up to DECOMPOSED_MAX_REPAIR_CYCLES bounded REPAIR phases, each given the exact validation failure JSON as its objective, re-validating after each",
+        "MAX_RETRIES": "DECOMPOSED_MAX_REPAIR_CYCLES (2)",
+        "FAIL_CLOSED_CONDITION": "still failing after all repair cycles -> status=succeeded_validation_failed, promotion_eligible=False, never auto-promoted",
+        "ESCALATION_CONDITION": "a repair phase itself calls escalate -> job terminates ESCALATED with the validation failure preserved in the ledger",
+    },
+    "TEST_FAILURE": {
+        "DETECTION": "_classify_validation_failure() inspects vres.to_json()['checks'] for a failing check whose name signals it is a test-execution check (distinct from a static/lint check)",
+        "RECOVERY_STRATEGY": "the repair objective explicitly names the failing test check(s) and their output, not just 'validation failed' — a targeted repair, not a blind retry",
+        "MAX_RETRIES": "DECOMPOSED_MAX_REPAIR_CYCLES (2), shared budget with VALIDATION_FAILURE (same repair loop, distinguished only in objective wording/telemetry)",
+        "FAIL_CLOSED_CONDITION": "same as VALIDATION_FAILURE — deterministic validate() is the only ground truth, a phase's own 'finish' claim never overrides it",
+        "ESCALATION_CONDITION": "identical failing check name on two consecutive repair cycles -> flagged as NO_PROGRESS (see below), repair loop does not blindly repeat a third identical attempt",
+    },
+    "MODEL_FAILURE": {
+        "DETECTION": "run.final_action in RETRYABLE_FINAL_ACTIONS for the CURRENT model specifically (not a whole-provider outage)",
+        "RECOVERY_STRATEGY": "fail over to the next REAL installed model via _filter_actually_installed(), same-provider, never a phantom configured-only model",
+        "MAX_RETRIES": "bounded by real installed-model count minus already-attempted (engineering_failover_order())",
+        "FAIL_CLOSED_CONDITION": "no installed candidates remain -> falls through to PROVIDER_FAILURE handling",
+        "ESCALATION_CONDITION": "same-provider chain exhausted -> provider failover attempted next",
+    },
+    "PROVIDER_FAILURE": {
+        "DETECTION": "the current provider (ollama) itself is unreachable (local_model_health.check().available is False), or its model failover chain is exhausted mid-phase",
+        "RECOVERY_STRATEGY": "select another actually-eligible provider under canonical policy — provider_b (standalone llama-server, independent of the ollama daemon) — exactly once per phase, skipped outright if its circuit breaker is open",
+        "MAX_RETRIES": "1 provider switch per phase (bounded — never cycles providers back and forth)",
+        "FAIL_CLOSED_CONDITION": "provider_b also unavailable/circuit-open -> phase returns its last real outcome, never fabricated success",
+        "ESCALATION_CONDITION": "both providers exhausted -> phase/job outcome stands, whole-job level may still reach Claude/human escalation via evolution/advance.py's engine router",
+    },
+    "CONTEXT_PRESSURE": {
+        "DETECTION": "accumulated prior_summary text passed into the next phase exceeds CONTEXT_PRESSURE_SUMMARY_CHAR_LIMIT",
+        "RECOVERY_STRATEGY": "checkpoint the verified state already recorded in phases_state (unaffected — full history stays in the durable ledger), summarize/narrow ONLY the prompt-facing prior_summary via _narrow_prior_summary(), then continue with the next bounded phase",
+        "MAX_RETRIES": "n/a — a one-time deterministic truncation applied before each phase call, not a retry loop",
+        "FAIL_CLOSED_CONDITION": "narrowing never drops the durable ledger record, only the prompt text — validation still reads real sandbox state, never the summary",
+        "ESCALATION_CONDITION": "not an escalation trigger by itself — narrowing is silent, bounded housekeeping, recorded in the phase entry for observability",
+    },
+    "PARTIAL_IMPLEMENTATION": {
+        "DETECTION": "a phase escalates or the job is interrupted after >=1 phase already completed with real files_touched",
+        "RECOVERY_STRATEGY": "preserve every valid change already snapshotted (files_touched diff is computed and recorded regardless of the terminal outcome); the ESCALATED/FAILED checkpoint's phases_state + files_touched IS the exact record of what remains unfinished for a targeted follow-up",
+        "MAX_RETRIES": "n/a — this is a record-preservation guarantee, not a retry",
+        "FAIL_CLOSED_CONDITION": "partial files are never presented as promotion_eligible — only a full validation+canary pass on the complete change-set can set that",
+        "ESCALATION_CONDITION": "same as the underlying phase's own escalation (VALIDATION_FAILURE / MODEL_FAILURE / etc.) — PARTIAL_IMPLEMENTATION only changes what gets RECORDED, never the escalation trigger itself",
+    },
+    "NO_PROGRESS": {
+        "DETECTION": "within a single phase's model-failover loop: two consecutive attempts produce an IDENTICAL sandbox snapshot diff (no files added/modified/removed) despite a retryable outcome. Across repair cycles: the deterministic validation failure signature (failing check names) repeats unchanged after a full repair attempt (repeated_failure_signature, recorded but not solely trusted -- see MAX_RETRIES)",
+        "RECOVERY_STRATEGY": "within a phase: stop model failover immediately (no_progress_stop) rather than exhausting the full candidate list on further zero-diff attempts. Across repair cycles: recorded for observability only -- a validator can legitimately report a generic/empty checks list between attempts even when real progress differs, so signature-repetition alone never truncates the repair budget",
+        "MAX_RETRIES": "within a phase: 1 repeated zero-diff attempt is the hard ceiling (bounded, tested). Across repair cycles: unchanged from VALIDATION_FAILURE's own bound, DECOMPOSED_MAX_REPAIR_CYCLES -- NO_PROGRESS detection there is telemetry, not an additional retry limit",
+        "FAIL_CLOSED_CONDITION": "a no-progress phase or repair cycle is never marked finished/successful — its real final_action (error/escalate/iteration_ceiling_reached) and the deterministic validation outcome are preserved untouched",
+        "ESCALATION_CONDITION": "no_progress_stop=True is recorded on the specific attempt that triggered it; repeated_failure_signature=True is recorded on a repair phase entry for Founder/telemetry visibility, without itself forcing escalation",
+    },
+}
+
 # omniengineer_agent tool -> the ledger JobState it most closely represents,
 # for per-iteration checkpointing. finish/escalate are deliberately absent —
 # the harness sets the real terminal/near-terminal state itself once the
@@ -187,6 +327,8 @@ class JobResult:
     failure_classification: str | None = None  # most recent local_model_health.classify_failure() value, if any failure occurred
     independent_validation: dict[str, Any] | None = None  # SINGLE_VALIDATOR_DEPENDENCY: evolution.independent_validation.recheck() result, if run
     worker_backend: str | None = None
+    partial_progress: dict[str, Any] | None = None  # PARTIAL_IMPLEMENTATION: which phases completed / which files were validly changed before an escalate, if any
+    decomposed: bool = False  # True when this JobResult came from submit_job_decomposed() (directly or via submit_job_auto())
 
 
 def _snapshot(root: Path) -> dict[str, str]:
@@ -358,6 +500,42 @@ def submit_job(
         source_paths=[Path(p) for p in (source_paths or [])],
         allowed_tools=frozenset(allowed_tools) if allowed_tools is not None else None,
         copy_source_paths=True,
+    )
+
+
+def submit_job_auto(
+    task: str, *, requested_by: str = "unspecified", timeout_s: int = DEFAULT_TIMEOUT_S,
+    founder_approved: bool = False, model: str = DEFAULT_MODEL,
+    max_iterations: int = MAX_ITERATIONS,
+    validation_config: dict[str, Any] | None = None,
+    on_job_created: Callable[[str], None] | None = None,
+    source_paths: list[str] | None = None,
+    allowed_tools: list[str] | None = None,
+) -> JobResult:
+    """ROUTER_INTEGRATION (OMNI_GOD_MODE_V1 Phase 3): the single entry point
+    every caller of Omni Engineer should use going forward -- task_router.py
+    (via omni_engineer_adapter.py) and evolution/advance.py's
+    _run_omni_engineer() both call THIS, not submit_job()/submit_job_decomposed()
+    directly, so complexity selection lives in exactly one place inside the
+    Omni capability boundary instead of being duplicated at every call site.
+    classify_complexity() decides simple vs. decomposed; everything else
+    (authority, source_paths, validation) behaves identically to calling the
+    chosen function directly -- this is a thin dispatcher, not a new engine
+    or a new router."""
+    complexity = classify_complexity(task)
+    if complexity.decomposition_eligible:
+        return submit_job_decomposed(
+            task, requested_by=requested_by, timeout_s=timeout_s,
+            founder_approved=founder_approved, model=model,
+            max_iterations_per_phase=DECOMPOSED_MAX_ITERATIONS_PER_PHASE,
+            validation_config=validation_config, on_job_created=on_job_created,
+            source_paths=source_paths,
+        )
+    return submit_job(
+        task, requested_by=requested_by, timeout_s=timeout_s,
+        founder_approved=founder_approved, model=model, max_iterations=max_iterations,
+        validation_config=validation_config, on_job_created=on_job_created,
+        source_paths=source_paths, allowed_tools=allowed_tools,
     )
 
 
@@ -1332,37 +1510,164 @@ def _phase_task_text(parent_task: str, phase_name: str, phase_objective: str, pr
     return "\n".join(parts)
 
 
+CONTEXT_PRESSURE_SUMMARY_CHAR_LIMIT = 4000  # prompt-facing prior_summary narrowing threshold (CONTEXT_PRESSURE)
+
+
+def _narrow_prior_summary(prior_summary: str) -> tuple[str, bool]:
+    """CONTEXT_PRESSURE recovery: narrow the PROMPT-FACING prior_summary text
+    once it grows past a bounded limit, keeping the most recent (most
+    relevant to the next phase) content. Never touches the durable
+    phases_state ledger record — only what gets fed back into the next
+    model prompt. Returns (possibly-narrowed text, was_narrowed)."""
+    if len(prior_summary) <= CONTEXT_PRESSURE_SUMMARY_CHAR_LIMIT:
+        return prior_summary, False
+    head = "[earlier phase summaries truncated for context pressure -- see the durable phase ledger for full history]\n"
+    tail = prior_summary[-(CONTEXT_PRESSURE_SUMMARY_CHAR_LIMIT - len(head)):]
+    return head + tail, True
+
+
+def _classify_validation_failure(vres: Any) -> str:
+    """TEST_FAILURE vs generic VALIDATION_FAILURE: a failing check whose own
+    name signals it ran tests (vs. a static/lint/schema check) gets the more
+    specific class so the repair objective can name it precisely."""
+    try:
+        checks = vres.to_json().get("checks", [])
+    except Exception:  # noqa: BLE001 — classification must never break the repair loop itself
+        return "validation_failure"
+    for c in checks:
+        if not c.get("passed", True) and "test" in str(c.get("name", "")).lower():
+            return "test_failure"
+    return "validation_failure"
+
+
 def _run_phase(
     phase_name: str, phase_objective: str, workdir: Path, *, parent_task: str,
     prior_summary: str, model: str, max_iterations: int, timeout_s: int,
-) -> tuple[Any, str, list[str]]:
+) -> tuple[Any, str, list[str], list[dict[str, Any]]]:
     """Runs ONE bounded phase in the SAME sandbox the parent job already
     owns. Bounded model failover on a retryable outcome (iteration_ceiling_
     reached/timeout/model_unavailable/error): try the next REAL installed
     model (_filter_actually_installed(), same real-time check as the
-    whole-job path), never a phantom configured-only one. finish/escalate
-    are always terminal for the phase -- never retried with a different
-    model. Returns (AgentRunResult, model_actually_used, attempted_models)."""
+    whole-job path), never a phantom configured-only one; once same-provider
+    (ollama) candidates are exhausted, tries independent provider_b exactly
+    once (PROVIDER_FAILURE), skipped if its circuit breaker is open. finish/
+    escalate are always terminal for the phase -- never retried with a
+    different model. NO_PROGRESS: two consecutive attempts producing an
+    IDENTICAL sandbox diff stop the failover loop early rather than
+    exhausting every remaining candidate on a strategy that isn't working.
+
+    PHASE_NARRATIVE_ACCURACY: every attempt (not just the last) is recorded
+    in the returned attempt_history, each with its OWN files-touched diff --
+    so an earlier model's real completed work is never erased from the
+    record just because a later model in the same phase's failover chain
+    then failed. Returns (AgentRunResult, model_actually_used,
+    attempted_models, attempt_history)."""
     allowed = _PHASE_TOOLS.get(phase_name)
     task_text = _phase_task_text(parent_task, phase_name, phase_objective, prior_summary, allowed)
     attempted: list[str] = []
+    attempt_history: list[dict[str, Any]] = []
     current_model = model
+    current_provider = "ollama"
     t0 = time.monotonic()
+    phase_start_snapshot = _snapshot(workdir)
+    prev_attempt_diff: dict[str, list[str]] | None = None
+    consecutive_no_progress = 0
+
     while True:
         attempted.append(current_model)
+        before_attempt = _snapshot(workdir)
         remaining = max(30, timeout_s - int(time.monotonic() - t0))
         run = run_agent_loop(
-            task_text, workdir, model=current_model, provider="ollama",
+            task_text, workdir, model=current_model, provider=current_provider,
             max_iterations=max_iterations, timeout_s=remaining, allowed_tools=allowed,
         )
+        after_attempt = _snapshot(workdir)
+        attempt_diff = _diff_snapshots(before_attempt, after_attempt)
+        attempt_has_progress = any(attempt_diff.get(k) for k in ("added", "modified", "removed"))
+        no_progress_this_attempt = (not attempt_has_progress) and run.final_action in RETRYABLE_FINAL_ACTIONS
+        attempt_history.append({
+            "model": current_model, "provider": current_provider, "final_action": run.final_action,
+            "summary": run.summary_or_reason or "", "commands_executed": list(run.commands_executed),
+            "files_touched": attempt_diff, "no_progress": no_progress_this_attempt,
+        })
+
         if run.final_action in ("finish", "escalate"):
-            return run, current_model, attempted
-        health = local_model_health.check(model=current_model)
-        candidates = local_model_health.engineering_failover_order(exclude=attempted)
-        candidates, _not_installed = _filter_actually_installed(candidates, health.models if health.available else [])
-        if not candidates:
-            return run, current_model, attempted
-        current_model = candidates[0]
+            return run, current_model, attempted, attempt_history
+
+        if no_progress_this_attempt and prev_attempt_diff == attempt_diff:
+            consecutive_no_progress += 1
+        else:
+            consecutive_no_progress = 0
+        prev_attempt_diff = attempt_diff
+        if consecutive_no_progress >= 1:  # NO_PROGRESS: 1 repeated zero-diff attempt is the hard ceiling
+            attempt_history[-1]["no_progress_stop"] = True
+            return run, current_model, attempted, attempt_history
+
+        # MODEL_FAILURE: try the next real installed model, same provider.
+        if current_provider == "ollama":
+            health = local_model_health.check(model=current_model)
+            candidates = local_model_health.engineering_failover_order(exclude=attempted)
+            candidates, _not_installed = _filter_actually_installed(candidates, health.models if health.available else [])
+            if candidates:
+                current_model = candidates[0]
+                continue
+
+        # PROVIDER_FAILURE: same-provider (ollama) chain exhausted -- try
+        # the independent provider_b exactly once per phase.
+        provider_b_already_tried = any(a["provider"] == "provider_b" for a in attempt_history)
+        if current_provider == "ollama" and not provider_b_already_tried:
+            if not local_model_health.circuit_is_open("provider_b"):
+                remaining = max(30, timeout_s - int(time.monotonic() - t0))
+                if remaining > 30:
+                    import provider_b_bridge
+                    try:
+                        pb_health = provider_b_bridge.ensure_running()
+                    except provider_b_bridge.ModelArtifactMissing:
+                        pb_health = None
+                    if pb_health is not None and pb_health.available:
+                        current_model = provider_b_bridge.DEFAULT_MODEL
+                        current_provider = "provider_b"
+                        continue
+        return run, current_model, attempted, attempt_history
+
+
+# ---- SOURCE_PATH / CONTEXT STAGING for decomposed jobs (Phase 3) ----------
+# GATED_PATH_MARKERS (authority_policy.py) already blocks a job from ever
+# reaching credential/protected paths at all (FOUNDER_GATED). This is a
+# SEPARATE, complementary hygiene filter: even an authority-safe path can be
+# noisy, historical, or irrelevant context that should never be silently
+# staged into a bounded phase's prompt just because a caller's source_paths
+# list happened to include it. Default-exclude; live canonical source wins
+# over historical copies.
+CONTEXT_STAGING_DEFAULT_EXCLUDED_MARKERS = (
+    "manual_candidates",
+    "continuity_backup",
+    "/backups/",
+    "_backup/",
+    "archived_jobs",
+    "founder_receipts",
+    "content_packet",
+    "/logs/",
+    ".log",
+    "/jobs/",  # another job's own historical workdir tree
+)
+
+
+def _stage_context_source_paths(source_paths: list[Path]) -> tuple[list[Path], list[dict[str, str]]]:
+    """Splits caller-provided source_paths into (allowed, excluded) per the
+    default-exclusion markers above. Returns the excluded list with its
+    matched marker for durable, honest recording -- callers never silently
+    lose a path without a reason on record."""
+    allowed: list[Path] = []
+    excluded: list[dict[str, str]] = []
+    for p in source_paths:
+        p_str = str(p)
+        marker = next((m for m in CONTEXT_STAGING_DEFAULT_EXCLUDED_MARKERS if m.lower() in p_str.lower()), None)
+        if marker:
+            excluded.append({"path": p_str, "excluded_marker": marker})
+        else:
+            allowed.append(p)
+    return allowed, excluded
 
 
 def submit_job_decomposed(
@@ -1371,17 +1676,31 @@ def submit_job_decomposed(
     max_iterations_per_phase: int = DECOMPOSED_MAX_ITERATIONS_PER_PHASE,
     validation_config: dict[str, Any] | None = None,
     on_job_created: Callable[[str], None] | None = None,
+    source_paths: list[str] | None = None,
 ) -> JobResult:
     """Bounded, phase-decomposed alternative to submit_job() for large/
     complex objectives. One canonical job_id/sandbox/ledger throughout.
     Fixed phase sequence: INSPECT -> IMPLEMENT -> TEST -> (deterministic
     VALIDATE, reusing validation.py exactly as submit_job()'s single-loop
     path does) -> up to DECOMPOSED_MAX_REPAIR_CYCLES bounded REPAIR phases
-    on a validation failure, re-validating after each. Does NOT support
-    source_paths in this version -- a disclosed, real scope limit, not a
-    silent gap. Never marks a job successful on a phase's own 'finish' call
-    alone; final success is always the deterministic validation+canary+
-    independent_validation pipeline, identically to submit_job()."""
+    on a validation failure, re-validating after each. Never marks a job
+    successful on a phase's own 'finish' call alone; final success is always
+    the deterministic validation+canary+independent_validation pipeline,
+    identically to submit_job().
+
+    source_paths (Phase 3): GOVERNED, same mechanism as submit_job() --
+    explicitly authorized real files/dirs, checked against
+    authority_policy.GATED_PATH_MARKERS, copied ONCE into the sandbox before
+    the inspect phase starts (never re-copied mid-job, so a later phase can
+    never silently broaden its own context). Additionally passed through
+    _stage_context_source_paths(), which default-excludes noisy/historical
+    trees (manual_candidates/, backups/, other jobs' workdirs, receipts,
+    logs) even when authority-safe -- a context-hygiene filter, distinct
+    from and in addition to the authority gate. The fully-automatic
+    evolution/advance.py proposal pipeline deliberately never passes
+    source_paths here (same "no recursive self-modification" doctrine it
+    already applies to submit_job()) -- this parameter is for explicitly
+    authorized, non-automatic callers only."""
     fp = job_ledger.task_fingerprint(task)
     existing = job_ledger.find_active_by_fingerprint(fp)
     if existing is not None:
@@ -1396,10 +1715,14 @@ def submit_job_decomposed(
     workdir = JOBS_ROOT / job_id / "workdir"
     workdir.mkdir(parents=True, exist_ok=True)
     timeout_s = min(timeout_s, MAX_TIMEOUT_S)
+    all_source_paths = [Path(p) for p in (source_paths or [])]
+    staged_source_paths, excluded_source_paths = _stage_context_source_paths(all_source_paths)
     job_ledger.create(
         job_id, task=task, requested_by=requested_by, sandbox_path=str(workdir),
         model=model, max_iterations=max_iterations_per_phase,
-        submit_params={"decomposed": True, "validation_config": validation_config},
+        submit_params={"decomposed": True, "validation_config": validation_config,
+                       "source_paths": _json_safe_submit_value(source_paths or [], field="source_paths"),
+                       "context_staging_excluded": excluded_source_paths},
     )
     job_ledger.claim(job_id, owner=requested_by)
     started_at = datetime.now(timezone.utc).isoformat()
@@ -1408,7 +1731,7 @@ def submit_job_decomposed(
     try:
         decision = classify(
             task_description=task, requested_tools=set(), sandbox_root=workdir,
-            source_paths=[], founder_approved=founder_approved, adapter=OMNI_ENGINEER_ID,
+            source_paths=all_source_paths, founder_approved=founder_approved, adapter=OMNI_ENGINEER_ID,
         )
         job_ledger.checkpoint(job_id, JobState.AUTHORIZED, risk_class=decision.risk_class.value,
                                approval_state=decision.approval_state.value,
@@ -1429,18 +1752,50 @@ def submit_job_decomposed(
 
         job_ledger.checkpoint(job_id, JobState.ROUTED, selected_engine=OMNI_ENGINEER_ID)
 
+        # Copy staged (authority-safe AND context-staging-safe) source_paths
+        # into the sandbox ONCE, before the inspect phase starts -- identical
+        # mechanism to submit_job()'s copy_source_paths step. This happens
+        # BEFORE before_all is snapshotted, so copied files are never
+        # reported as "added" by any phase -- only what a phase actually
+        # changes shows up in files_changed. No later phase re-copies or
+        # extends this set -- source_paths cannot silently broaden mid-job.
+        if staged_source_paths:
+            import shutil as _shutil
+            for src in staged_source_paths:
+                dest = _source_sandbox_destination(workdir, src)
+                if src.is_dir():
+                    _shutil.copytree(src, dest, dirs_exist_ok=True)
+                elif src.is_file():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    _shutil.copy2(src, dest)
+
         before_all = _snapshot(workdir)
         phases_state: list[dict[str, Any]] = []
         all_commands: list[str] = []
         attempted_models_all: list[str] = []
         prior_summary = ""
 
-        def _record_phase(name: str, objective: str, run, model_used: str, attempted: list[str]) -> dict[str, Any]:
+        def _record_phase(name: str, objective: str, run, model_used: str, attempted: list[str],
+                           attempt_history: list[dict[str, Any]]) -> dict[str, Any]:
+            # PHASE_NARRATIVE_ACCURACY: `final_action`/`summary` still record
+            # the LAST attempt's own outcome (the decision that ended the
+            # phase) -- but `attempts` preserves every attempt's own
+            # files_touched, so an earlier model's real completed work is
+            # never erased just because a later model in this phase's
+            # failover chain then failed. `progress_preserved` is a cheap,
+            # honest at-a-glance signal: True whenever ANY attempt in this
+            # phase produced a real sandbox diff, regardless of which
+            # attempt's final_action reads as success or failure.
+            progress_preserved = any(
+                any(a["files_touched"].get(k) for k in ("added", "modified", "removed"))
+                for a in attempt_history
+            )
             entry = {
                 "name": name, "objective": objective[:500],
                 "final_action": run.final_action, "summary": (run.summary_or_reason or "")[:800],
                 "model": model_used, "attempted_models": attempted,
                 "commands_executed": list(run.commands_executed), "ended_at": datetime.now(timezone.utc).isoformat(),
+                "attempts": attempt_history, "progress_preserved": progress_preserved,
             }
             phases_state.append(entry)
             all_commands.extend(run.commands_executed)
@@ -1448,7 +1803,8 @@ def submit_job_decomposed(
                 if m not in attempted_models_all:
                     attempted_models_all.append(m)
             job_ledger.checkpoint(job_id, JobState.EDITING, phases=list(phases_state),
-                                   note=f"phase {name!r} finished: {run.final_action}")
+                                   note=f"phase {name!r} finished: {run.final_action} "
+                                        f"(progress_preserved={progress_preserved}, {len(attempt_history)} attempt(s))")
             return entry
 
         escalated = False
@@ -1463,12 +1819,13 @@ def submit_job_decomposed(
         ):
             if len(phases_state) >= DECOMPOSED_MAX_TOTAL_PHASES:
                 break
-            run, mdl, attempted = _run_phase(
+            prior_summary, _narrowed = _narrow_prior_summary(prior_summary)  # CONTEXT_PRESSURE
+            run, mdl, attempted, attempt_history = _run_phase(
                 phase_name, phase_objective, workdir, parent_task=task, prior_summary=prior_summary,
                 model=model, max_iterations=max_iterations_per_phase,
                 timeout_s=max(30, timeout_s - int(time.monotonic() - t0)),
             )
-            entry = _record_phase(phase_name, phase_objective, run, mdl, attempted)
+            entry = _record_phase(phase_name, phase_objective, run, mdl, attempted, attempt_history)
             if run.final_action == "escalate":
                 escalated = True
                 break
@@ -1476,6 +1833,15 @@ def submit_job_decomposed(
 
         if escalated:
             escalated_files_changed = _diff_snapshots(before_all, _snapshot(workdir))
+            # PARTIAL_IMPLEMENTATION: preserve exactly what completed and
+            # what did not -- never erased just because the LAST phase
+            # escalated.
+            partial_progress = {
+                "phases_completed": [p["name"] for p in phases_state[:-1]],
+                "phase_that_escalated": phases_state[-1]["name"] if phases_state else None,
+                "any_progress_preserved": any(p.get("progress_preserved") for p in phases_state),
+                "files_touched_before_escalation": escalated_files_changed,
+            }
             job_ledger.checkpoint(job_id, JobState.ESCALATED, terminal_result="escalated", phases=phases_state,
                                    attempted_models=attempted_models_all, error_class="model_escalate",
                                    files_touched=escalated_files_changed)
@@ -1487,7 +1853,7 @@ def submit_job_decomposed(
                 files_changed=escalated_files_changed, plan_text=None,
                 agent_final_action="escalate", agent_summary_or_reason=phases_state[-1]["summary"] if phases_state else None,
                 retried=len(attempted_models_all) > 1, commands_executed=all_commands,
-                attempted_models=attempted_models_all,
+                attempted_models=attempted_models_all, partial_progress=partial_progress, decomposed=True,
             )
             _finalize(result, requested_by=requested_by)
             return result
@@ -1499,19 +1865,51 @@ def submit_job_decomposed(
         vres = validation.validate(workdir, files_changed, config=validation_config)
 
         repair_cycles = 0
+        last_failure_signature: str | None = None
+        # NOTE on scope: DECOMPOSED_MAX_REPAIR_CYCLES is the sole, already-
+        # tested bound on this loop (see
+        # test_decomposed_repair_cycles_are_bounded, which deliberately
+        # asserts the FULL bounded budget is always spent under continuous
+        # failure -- a real validator can legitimately report an empty/
+        # generic checks list between attempts even when real underlying
+        # progress differs, so an identical failure_signature alone is not
+        # reliable enough evidence to cut that budget short). NO_PROGRESS
+        # here is therefore DETECTED and RECORDED (repeated_failure_signature
+        # on the phase entry, for observability/telemetry) but never used to
+        # truncate the repair budget -- MAX_RETRIES for VALIDATION_FAILURE/
+        # TEST_FAILURE stays exactly DECOMPOSED_MAX_REPAIR_CYCLES, matching
+        # ADAPTIVE_RETRY_MATRIX. The stricter, diff-based NO_PROGRESS early
+        # exit lives in _run_phase()'s own model-failover loop instead, where
+        # an empty sandbox diff IS reliable evidence (see there).
         while not vres.passed and repair_cycles < DECOMPOSED_MAX_REPAIR_CYCLES and len(phases_state) < DECOMPOSED_MAX_TOTAL_PHASES:
             repair_cycles += 1
+            failure_class = _classify_validation_failure(vres)  # TEST_FAILURE vs generic VALIDATION_FAILURE
+            failure_signature = json.dumps(
+                sorted(c.get("name", "") for c in vres.to_json().get("checks", []) if not c.get("passed", True)))
+            repeated_failure_signature = last_failure_signature is not None and failure_signature == last_failure_signature
+            last_failure_signature = failure_signature
             repair_objective = (
-                f"Validation FAILED (repair attempt {repair_cycles}/{DECOMPOSED_MAX_REPAIR_CYCLES}). "
-                f"Fix the specific issue(s) below, then call finish.\n{json.dumps(vres.to_json())[:1500]}"
+                f"Validation FAILED ({failure_class.upper()}, repair attempt {repair_cycles}/{DECOMPOSED_MAX_REPAIR_CYCLES}). "
+                f"Fix the SPECIFIC failing check(s) named below -- do not make unrelated changes. "
+                f"Then call finish.\n{json.dumps(vres.to_json())[:1500]}"
             )
-            run, mdl, attempted = _run_phase(
+            prior_summary, _narrowed = _narrow_prior_summary(prior_summary)  # CONTEXT_PRESSURE
+            run, mdl, attempted, attempt_history = _run_phase(
                 "repair", repair_objective, workdir, parent_task=task, prior_summary=prior_summary,
                 model=model, max_iterations=max_iterations_per_phase,
                 timeout_s=max(30, timeout_s - int(time.monotonic() - t0)),
             )
-            entry = _record_phase(f"repair_{repair_cycles}", repair_objective, run, mdl, attempted)
+            entry = _record_phase(f"repair_{repair_cycles}", repair_objective, run, mdl, attempted, attempt_history)
+            entry["failure_class"] = failure_class
+            entry["repeated_failure_signature"] = repeated_failure_signature
             if run.final_action == "escalate":
+                partial_progress = {
+                    "phases_completed": [p["name"] for p in phases_state[:-1]],
+                    "phase_that_escalated": entry["name"],
+                    "any_progress_preserved": any(p.get("progress_preserved") for p in phases_state),
+                    "files_touched_before_escalation": files_changed,
+                    "failure_class_at_escalation": failure_class,
+                }
                 job_ledger.checkpoint(job_id, JobState.ESCALATED, terminal_result="escalated", phases=phases_state,
                                        attempted_models=attempted_models_all, error_class="model_escalate",
                                        files_touched=files_changed, validation_result=vres.to_json())
@@ -1523,7 +1921,7 @@ def submit_job_decomposed(
                     files_changed=files_changed, plan_text=None, agent_final_action="escalate",
                     agent_summary_or_reason=entry["summary"], retried=len(attempted_models_all) > 1,
                     commands_executed=all_commands, attempted_models=attempted_models_all,
-                    validation=vres.to_json(),
+                    validation=vres.to_json(), partial_progress=partial_progress, decomposed=True,
                 )
                 _finalize(result, requested_by=requested_by)
                 return result
@@ -1570,6 +1968,7 @@ def submit_job_decomposed(
             retried=len(attempted_models_all) > 1, commands_executed=all_commands,
             attempted_models=attempted_models_all, validation=vres.to_json(), canary=canary_result,
             promotion_eligible=promotion_eligible, independent_validation=independent_validation_result,
+            decomposed=True,
         )
         _finalize(result, requested_by=requested_by)
         return result

@@ -1349,6 +1349,13 @@ def test_decomposed_escalate_stops_immediately_no_later_phases() -> None:
     record = job_ledger.load(r.job_id)
     check("ledger reflects exactly 2 recorded phases", len(record.phases) == 2, record.phases)
     check("ledger terminal state is escalated", record.state == job_ledger.JobState.ESCALATED.value, record.state)
+    # PARTIAL_IMPLEMENTATION (Phase 3): the record of what completed vs.
+    # what didn't must survive the escalation, not just files_touched.
+    check("partial_progress names the phase that actually completed (inspect)",
+          r.partial_progress is not None and r.partial_progress.get("phases_completed") == ["inspect"], r.partial_progress)
+    check("partial_progress names the phase that escalated (implement)",
+          r.partial_progress is not None and r.partial_progress.get("phase_that_escalated") == "implement", r.partial_progress)
+    check("JobResult.decomposed=True on an escalated decomposed job", r.decomposed is True, r.decomposed)
 
 
 def test_decomposed_validation_failure_triggers_bounded_repair_then_succeeds() -> None:
@@ -1469,7 +1476,7 @@ def test_decomposed_model_failover_within_a_phase_uses_real_installed_model_only
     _mrsilent_test_local_model_health.engineering_failover_order = lambda exclude=None: [m for m in ["qwen3-coder:30b", "qwen3.6:27b", "gpt-oss:20b"] if m not in (exclude or [])]
     harness.run_agent_loop = runner
     try:
-        run, mdl, attempted = harness._run_phase(
+        run, mdl, attempted, _attempt_history = harness._run_phase(
             "inspect", "objective", Path(tempfile.mkdtemp()), parent_task="x", prior_summary="",
             model="qwen3-coder:30b", max_iterations=6, timeout_s=60,
         )
@@ -1514,6 +1521,299 @@ def test_decomposed_ledger_record_carries_real_files_touched_and_promotion_eligi
           record.promotion_eligible is True, record.promotion_eligible)
     check("durable ledger record's files_touched reflects the real added file",
           "output.txt" in record.files_touched.get("added", []), record.files_touched)
+
+
+# ---- OMNI_GOD_MODE_V1 PHASE 3: complexity classification / router integration ----
+
+_PHASE3_SYNTHETIC_COMPLEX_TASK = """
+OMNI ENGINEER SYNTHETIC CERTIFICATION TASK -- Phase 3 test fixture only.
+
+PHASE 1 -- INSPECT
+Inspect widgets.py and test_widgets.py to understand the existing Widget class.
+
+PHASE 2 -- IMPLEMENT
+Design and implement a bounded extension: add a discount() method to
+widgets.py that validates its percentage argument.
+
+PHASE 3 -- TEST
+Write and run tests in test_widgets.py covering the new discount() method,
+including an invalid-percentage case.
+
+PHASE 4 -- REPAIR
+If any test fails, repair widgets.py and re-run the tests until they pass,
+then validate the full change-set.
+""".strip()
+
+
+def test_classify_complexity_simple_one_file_edit_is_not_eligible() -> None:
+    d = harness.classify_complexity("Fix the typo in README.md")
+    check("a simple one-file edit is NOT decomposition-eligible (fail-conservative)",
+          d.decomposition_eligible is False, d.reasons)
+
+
+def test_classify_complexity_length_alone_is_not_enough() -> None:
+    long_but_shapeless = "please help with this task. " * 100  # >1200 chars, zero structural signals
+    d = harness.classify_complexity(long_but_shapeless)
+    check("length alone (no stage keywords, no file mentions, no phase markers) is NOT enough",
+          d.decomposition_eligible is False, d.signals)
+
+
+def test_classify_complexity_multi_stage_synthetic_task_is_eligible() -> None:
+    """Calibrated against the SHAPE (length, PHASE N markers, multiple named
+    files, multiple stage keywords) of real historical job 6978adf2 -- using
+    an entirely separate, synthetic fixture task, never that job's own
+    content (which is explicitly out of scope for this campaign)."""
+    d = harness.classify_complexity(_PHASE3_SYNTHETIC_COMPLEX_TASK)
+    check("a multi-phase, multi-file, multi-stage-keyword synthetic task IS decomposition-eligible",
+          d.decomposition_eligible is True, d.signals)
+    check(">=2 independent signal categories actually fired",
+          len(d.reasons) >= 2 and not any("only" in r and "independent signal categor" in r for r in d.reasons), d.reasons)
+
+
+def test_submit_job_auto_dispatches_simple_task_to_submit_job() -> None:
+    original_simple = harness.submit_job
+    original_decomposed = harness.submit_job_decomposed
+    calls = {"simple": 0, "decomposed": 0}
+    harness.submit_job = lambda *a, **k: (calls.__setitem__("simple", calls["simple"] + 1), _god2_fake_jobresult())[1]
+    harness.submit_job_decomposed = lambda *a, **k: (calls.__setitem__("decomposed", calls["decomposed"] + 1), _god2_fake_jobresult())[1]
+    try:
+        harness.submit_job_auto("Fix the typo in README.md", requested_by="test")
+    finally:
+        harness.submit_job = original_simple
+        harness.submit_job_decomposed = original_decomposed
+    check("simple task routed to submit_job()", calls == {"simple": 1, "decomposed": 0}, calls)
+
+
+def test_submit_job_auto_dispatches_complex_task_to_submit_job_decomposed() -> None:
+    original_simple = harness.submit_job
+    original_decomposed = harness.submit_job_decomposed
+    calls = {"simple": 0, "decomposed": 0}
+    harness.submit_job = lambda *a, **k: (calls.__setitem__("simple", calls["simple"] + 1), _god2_fake_jobresult())[1]
+    harness.submit_job_decomposed = lambda *a, **k: (calls.__setitem__("decomposed", calls["decomposed"] + 1), _god2_fake_jobresult())[1]
+    try:
+        harness.submit_job_auto(_PHASE3_SYNTHETIC_COMPLEX_TASK, requested_by="test")
+    finally:
+        harness.submit_job = original_simple
+        harness.submit_job_decomposed = original_decomposed
+    check("complex task routed to submit_job_decomposed()", calls == {"simple": 0, "decomposed": 1}, calls)
+
+
+def _god2_fake_jobresult() -> "harness.JobResult":
+    return harness.JobResult(
+        job_id="fake", task="x", adapter="omni_engineer_v1", model="qwen3-coder:30b",
+        risk_class="low", approval_state="not_required", status="succeeded", workdir="x",
+        started_at="x", ended_at="x", duration_s=0.0,
+        files_changed={"added": [], "modified": [], "removed": []}, plan_text=None,
+        agent_final_action="finish", agent_summary_or_reason="x", retried=False,
+    )
+
+
+def test_context_staging_excludes_manual_candidates_and_backups_by_default() -> None:
+    noisy = [
+        Path("/opt/pulse5-core/mrsilent_bridge/manual_candidates/foo/bar.py"),
+        Path("/opt/pulse5-core/render_forge_01_continuity_backup/20260821/x.py"),
+        Path("/opt/pulse5-core/mrsilent_bridge/jobs/deadbeef-1234/workdir/y.py"),
+    ]
+    clean = [Path("/opt/pulse5-core/mrsilent_bridge/studio_router.py")]
+    allowed, excluded = harness._stage_context_source_paths(noisy + clean)
+    check("manual_candidates/ path was excluded by default", not any("manual_candidates" in str(p) for p in allowed), allowed)
+    check("continuity_backup path was excluded by default", not any("continuity_backup" in str(p) for p in allowed), allowed)
+    check("another job's own workdir tree was excluded by default", not any("/jobs/" in str(p) for p in allowed), allowed)
+    check("all 3 noisy paths are recorded as excluded with a reason", len(excluded) == 3, excluded)
+    check("a normal canonical live source file is NOT excluded", clean[0] in allowed, allowed)
+
+
+def test_decomposed_source_paths_are_staged_and_excluded_ones_are_recorded_not_copied() -> None:
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    runner, calls = _god2_sequenced_runner([_god2_fake_run() for _ in range(3)])
+    harness.run_agent_loop = runner
+    _god2_validation.validate = lambda *a, **k: type("V", (), {"passed": True, "to_json": lambda self: {"passed": True, "checks": []}})()
+
+    real_src_dir = Path(tempfile.mkdtemp(prefix="omni_p3_src_"))
+    (real_src_dir / "helper.py").write_text("# real canonical helper\n")
+    excluded_src_dir = Path(tempfile.mkdtemp(prefix="manual_candidates_lookalike_"))
+    excluded_marker_dir = excluded_src_dir / "manual_candidates"
+    excluded_marker_dir.mkdir()
+    (excluded_marker_dir / "withdrawn.py").write_text("# should never be staged\n")
+
+    try:
+        r = harness.submit_job_decomposed(
+            "synthetic decomposed test: source_paths staging", requested_by="test",
+            source_paths=[str(real_src_dir), str(excluded_marker_dir)],
+        )
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+        shutil.rmtree(real_src_dir, ignore_errors=True)
+        shutil.rmtree(excluded_src_dir, ignore_errors=True)
+
+    check("job with staged source_paths still succeeds", r.status == "succeeded", r.status)
+    staged_helper_files = list(Path(r.workdir).rglob("helper.py"))
+    check("the authorized, non-excluded source file WAS copied into the sandbox", len(staged_helper_files) == 1, list(Path(r.workdir).rglob("*")))
+    record = job_ledger.load(r.job_id)
+    excluded_recorded = (record.submit_params or {}).get("context_staging_excluded", [])
+    check("the manual_candidates-marked path was recorded as excluded, not silently dropped",
+          any("manual_candidates" in e.get("path", "") for e in excluded_recorded), excluded_recorded)
+    check("no file from the excluded manual_candidates tree reached the sandbox",
+          not any(p.name == "withdrawn.py" for p in Path(r.workdir).rglob("*")), list(Path(r.workdir).rglob("*")))
+
+
+def test_classify_validation_failure_distinguishes_test_from_generic() -> None:
+    v_test_fail = type("V", (), {"to_json": lambda self: {"passed": False, "checks": [
+        {"name": "unit_tests", "passed": False}, {"name": "lint", "passed": True}]}})()
+    v_generic_fail = type("V", (), {"to_json": lambda self: {"passed": False, "checks": [
+        {"name": "syntax_check", "passed": False}]}})()
+    v_broken_to_json = type("V", (), {"to_json": lambda self: (_ for _ in ()).throw(RuntimeError("boom"))})()
+    check("a failing check named 'unit_tests' classifies as test_failure",
+          harness._classify_validation_failure(v_test_fail) == "test_failure", None)
+    check("a failing check with no 'test' in its name classifies as generic validation_failure",
+          harness._classify_validation_failure(v_generic_fail) == "validation_failure", None)
+    check("a broken to_json() never raises -- classification degrades to generic validation_failure",
+          harness._classify_validation_failure(v_broken_to_json) == "validation_failure", None)
+
+
+def test_narrow_prior_summary_truncates_only_past_the_context_pressure_limit() -> None:
+    short = "short summary, well under the limit"
+    narrowed_short, was_narrowed_short = harness._narrow_prior_summary(short)
+    check("short prior_summary is returned unchanged", narrowed_short == short and was_narrowed_short is False, narrowed_short)
+
+    long = "x" * (harness.CONTEXT_PRESSURE_SUMMARY_CHAR_LIMIT + 500)
+    narrowed_long, was_narrowed_long = harness._narrow_prior_summary(long)
+    check("long prior_summary IS narrowed", was_narrowed_long is True, len(narrowed_long))
+    check("narrowed text stays bounded near the configured limit",
+          len(narrowed_long) <= harness.CONTEXT_PRESSURE_SUMMARY_CHAR_LIMIT + 200, len(narrowed_long))
+    check("narrowed text keeps the MOST RECENT content (the tail), not the oldest",
+          narrowed_long.endswith("x" * 50), narrowed_long[-10:])
+
+
+def test_adaptive_retry_matrix_covers_all_nine() -> None:
+    required_classes = {
+        "TOOL_SCHEMA_FAILURE", "ITERATION_STALL", "VALIDATION_FAILURE", "TEST_FAILURE",
+        "MODEL_FAILURE", "PROVIDER_FAILURE", "CONTEXT_PRESSURE", "PARTIAL_IMPLEMENTATION", "NO_PROGRESS",
+    }
+    matrix = harness.ADAPTIVE_RETRY_MATRIX
+    check("all 9 required failure classes are present", set(matrix.keys()) == required_classes, sorted(matrix.keys()))
+    required_fields = {"DETECTION", "RECOVERY_STRATEGY", "MAX_RETRIES", "FAIL_CLOSED_CONDITION", "ESCALATION_CONDITION"}
+    for cls, spec in matrix.items():
+        check(f"{cls} has all 5 required fields, non-empty",
+              set(spec.keys()) == required_fields and all(str(v).strip() for v in spec.values()), spec)
+
+
+def test_phase_narrative_preserves_earlier_model_progress_after_later_model_failure() -> None:
+    """PHASE_NARRATIVE_ACCURACY: model A does real work then fails
+    (iteration_ceiling_reached); model B then also fails with zero new
+    work. The phase's own recorded final_action is B's failure -- but the
+    attempt history must still show A's real file, and progress_preserved
+    must be True, not silently erased by B's failure."""
+    original_run = harness.run_agent_loop
+    original_check = _mrsilent_test_local_model_health.check
+    original_order = _mrsilent_test_local_model_health.engineering_failover_order
+
+    def runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        if model == "qwen3-coder:30b":
+            (workdir / "real_progress.py").write_text("# model A really wrote this\n")
+            return _god2_fake_run("iteration_ceiling_reached", "ran out of iterations after writing the file")
+        return _god2_fake_run("error", "model B failed immediately, wrote nothing")
+
+    _mrsilent_test_local_model_health.check = lambda **k: type("H", (), {"available": True, "models": ["qwen3-coder:30b", "qwen3.6:27b"]})()
+    _mrsilent_test_local_model_health.engineering_failover_order = lambda exclude=None: [m for m in ["qwen3-coder:30b", "qwen3.6:27b"] if m not in (exclude or [])]
+    harness.run_agent_loop = runner
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        run, mdl, attempted, attempt_history = harness._run_phase(
+            "implement", "objective", tmp, parent_task="x", prior_summary="",
+            model="qwen3-coder:30b", max_iterations=6, timeout_s=60,
+        )
+    finally:
+        harness.run_agent_loop = original_run
+        _mrsilent_test_local_model_health.check = original_check
+        _mrsilent_test_local_model_health.engineering_failover_order = original_order
+
+    check("phase's own final_action is B's failure (the real, honest outcome)", run.final_action == "error", run.final_action)
+    check("2 attempts recorded", len(attempt_history) == 2, attempt_history)
+    check("model A's attempt entry shows its real file in files_touched",
+          "real_progress.py" in attempt_history[0]["files_touched"].get("added", []), attempt_history[0])
+    check("model B's attempt entry shows zero files touched",
+          not any(attempt_history[1]["files_touched"].get(k) for k in ("added", "modified", "removed")), attempt_history[1])
+    # Simulate _record_phase's own progress_preserved computation directly.
+    progress_preserved = any(
+        any(a["files_touched"].get(k) for k in ("added", "modified", "removed")) for a in attempt_history)
+    check("progress_preserved=True despite the LAST attempt being a failure (FALSE_PHASE_SUCCESS=NO, but progress is not erased)",
+          progress_preserved is True, attempt_history)
+
+
+def test_no_progress_detection_stops_before_exhausting_every_candidate_model() -> None:
+    """NO_PROGRESS: two consecutive zero-diff retryable attempts must stop
+    the failover loop early rather than burning every remaining candidate
+    on a strategy that demonstrably isn't working."""
+    original_run = harness.run_agent_loop
+    original_check = _mrsilent_test_local_model_health.check
+    original_order = _mrsilent_test_local_model_health.engineering_failover_order
+    attempts_made = []
+
+    def runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        attempts_made.append(model)
+        return _god2_fake_run("error", "no-op, wrote nothing")  # never writes any file -> zero diff every time
+
+    _mrsilent_test_local_model_health.check = lambda **k: type("H", (), {"available": True, "models": ["m1", "m2", "m3"]})()
+    _mrsilent_test_local_model_health.engineering_failover_order = lambda exclude=None: [m for m in ["m1", "m2", "m3"] if m not in (exclude or [])]
+    harness.run_agent_loop = runner
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        run, mdl, attempted, attempt_history = harness._run_phase(
+            "implement", "objective", tmp, parent_task="x", prior_summary="",
+            model="m1", max_iterations=6, timeout_s=60,
+        )
+    finally:
+        harness.run_agent_loop = original_run
+        _mrsilent_test_local_model_health.check = original_check
+        _mrsilent_test_local_model_health.engineering_failover_order = original_order
+
+    check("stopped after 2 zero-diff attempts, never tried the 3rd candidate (m3)",
+          attempts_made == ["m1", "m2"], attempts_made)
+    check("the second attempt is flagged no_progress_stop", attempt_history[-1].get("no_progress_stop") is True, attempt_history)
+
+
+def test_run_phase_falls_over_to_provider_b_when_ollama_candidates_exhausted() -> None:
+    """PROVIDER_FAILURE at the phase level: once same-provider (ollama)
+    candidates are exhausted, the phase tries the independent provider_b
+    exactly once before giving up."""
+    import provider_b_bridge
+    original_run = harness.run_agent_loop
+    original_check = _mrsilent_test_local_model_health.check
+    original_order = _mrsilent_test_local_model_health.engineering_failover_order
+    original_circuit_open = _mrsilent_test_local_model_health.circuit_is_open
+    original_ensure_running = provider_b_bridge.ensure_running
+    calls = []
+
+    def runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        calls.append((model, provider))
+        if provider == "provider_b":
+            return _god2_fake_run("finish", "provider_b saved the day")
+        return _god2_fake_run("error", "ollama model failed")
+
+    _mrsilent_test_local_model_health.check = lambda **k: type("H", (), {"available": True, "models": ["m1"]})()
+    _mrsilent_test_local_model_health.engineering_failover_order = lambda exclude=None: [m for m in ["m1"] if m not in (exclude or [])]
+    _mrsilent_test_local_model_health.circuit_is_open = lambda provider: False
+    provider_b_bridge.ensure_running = lambda **k: type("H", (), {"available": True})()
+    harness.run_agent_loop = runner
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        run, mdl, attempted, attempt_history = harness._run_phase(
+            "implement", "objective", tmp, parent_task="x", prior_summary="",
+            model="m1", max_iterations=6, timeout_s=60,
+        )
+    finally:
+        harness.run_agent_loop = original_run
+        _mrsilent_test_local_model_health.check = original_check
+        _mrsilent_test_local_model_health.engineering_failover_order = original_order
+        _mrsilent_test_local_model_health.circuit_is_open = original_circuit_open
+        provider_b_bridge.ensure_running = original_ensure_running
+
+    check("ollama candidate m1 tried first, then provider_b", calls == [("m1", "ollama"), (provider_b_bridge.DEFAULT_MODEL, "provider_b")], calls)
+    check("phase ultimately finished cleanly via provider_b", run.final_action == "finish", run.final_action)
+    check("provider_b attempt is recorded in attempt_history", attempt_history[-1]["provider"] == "provider_b", attempt_history)
 
 
 if __name__ == "__main__":
@@ -1563,6 +1863,19 @@ if __name__ == "__main__":
     test_decomposed_phase_state_survives_simulated_crash_and_resume_reads_it()
     test_decomposed_model_failover_within_a_phase_uses_real_installed_model_only()
     test_decomposed_ledger_record_carries_real_files_touched_and_promotion_eligible()
+    test_classify_complexity_simple_one_file_edit_is_not_eligible()
+    test_classify_complexity_length_alone_is_not_enough()
+    test_classify_complexity_multi_stage_synthetic_task_is_eligible()
+    test_submit_job_auto_dispatches_simple_task_to_submit_job()
+    test_submit_job_auto_dispatches_complex_task_to_submit_job_decomposed()
+    test_context_staging_excludes_manual_candidates_and_backups_by_default()
+    test_decomposed_source_paths_are_staged_and_excluded_ones_are_recorded_not_copied()
+    test_classify_validation_failure_distinguishes_test_from_generic()
+    test_narrow_prior_summary_truncates_only_past_the_context_pressure_limit()
+    test_adaptive_retry_matrix_covers_all_nine()
+    test_phase_narrative_preserves_earlier_model_progress_after_later_model_failure()
+    test_no_progress_detection_stops_before_exhausting_every_candidate_model()
+    test_run_phase_falls_over_to_provider_b_when_ollama_candidates_exhausted()
     test_full_target_loop_live()
 
     print()

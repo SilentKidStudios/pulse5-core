@@ -345,7 +345,17 @@ def run_local_static_validation(target_dir: str, *, requested_by: str, files_cha
 
 
 def _run_omni_engineer(task_text: str, requested_by: str, proposal_id: str) -> tuple[EngineAttempt, Any]:
-    job = omniengineer_harness.submit_job(
+    # ROUTER_INTEGRATION (Phase 3): submit_job_auto() classifies task_text
+    # complexity inside the Omni capability boundary and dispatches to
+    # submit_job() (simple) or submit_job_decomposed() (complex) -- this is
+    # the ONLY change to the canonical Proposal->router->engine pipeline;
+    # _implementation_router()/_rank_engineering_engines()/studio_router are
+    # untouched. source_paths is intentionally NOT passed here: this call
+    # site is the fully-automatic advance_one() pipeline, which by design
+    # (see this module's docstring, "no recursive self-modification") never
+    # gives an implementing job real source_paths at either engine, simple
+    # or decomposed.
+    job = omniengineer_harness.submit_job_auto(
         task=task_text, requested_by=requested_by,
         timeout_s=OMNI_IMPLEMENT_TIMEOUT_S, founder_approved=False,
         on_job_created=lambda jid: proposal_mod.append_implementation_job(
