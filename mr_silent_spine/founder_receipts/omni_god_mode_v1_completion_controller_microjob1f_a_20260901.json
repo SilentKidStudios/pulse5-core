@@ -2,6 +2,7 @@
   "created_utc": "2026-09-01T19:35:00Z",
   "campaign": "COMPLETION_CONTROLLER_MICRO_JOB_1F_ONE_SOURCE_FILE_PER_JOB",
   "baseline_commit": "fdef798",
+  "microjob1f_a_commit": "e01437c",
   "status": "MICRO_JOB_1F_A = FAIL, after both a local Omni attempt and one canonical escalation attempt. Per this campaign's explicit rule ('If any sub-job still fails after one canonical escalation attempt: STOP. Do not retry/rephrase again.'), this stops here. Jobs 1F-B/C/D were never started (each requires the prior one to PASS).",
 
   "role_boundary_respected": "Claude did not write, invent, or manually repair any API-contract content. The local Omni attempt was submitted through the real omniengineer_harness.submit_job() path. The escalation candidate was selected by actually calling the real, canonical studio_router.select() function (not assumed), which correctly excluded the metered claude_code_engineer_v1 under paid_resources_allowed=false and selected the one real, free, already-registered eligible candidate (local_model_engineer_v1). The escalation call embedded the REAL, verbatim source file text so that any correct output would be genuine analysis, not fabrication -- and the model's own output was rejected as not satisfying the task, not silently accepted or repaired.",
