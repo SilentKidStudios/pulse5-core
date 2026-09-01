@@ -1264,3 +1264,318 @@ def _task30b2_compute_preflight(
         current_provider,
         current_model,
     )
+
+
+# ============================================================
+# OMNI_GOD_MODE_V1 PHASE 2 — bounded task decomposition
+#
+# Real regression target: job 6978adf2, where qwen3-coder:30b used all 18
+# iterations of ONE undecomposed ReAct loop on a large, multi-file task
+# without ever calling finish, run_validator, or run_command.
+#
+# Design constraints this satisfies: ONE canonical parent job_id/sandbox/
+# ledger record throughout (no second job-tracking system); a FIXED, small,
+# bounded phase sequence (no dynamic/unbounded decomposition); each phase is
+# just another run_agent_loop() call in the SAME sandbox with a smaller
+# max_iterations and a phase-scoped allowed_tools set (reusing the
+# EXISTING, structurally-enforced allowed_tools gate -- not a new
+# capability); durable phase state lives on the SAME LedgerRecord
+# (LedgerRecord.phases); final success is decided by the EXISTING
+# validation.py + canary + independent_validation pipeline, unconditionally
+# -- a phase merely calling finish is never sufficient by itself. Defined
+# after the H5 engineering-memory wrapping above, so run_agent_loop/
+# _generate_plan/_finalize calls below automatically get memory-context
+# behavior identically to a normal submit_job() run -- nothing new to wire.
+# ============================================================
+
+DECOMPOSED_MAX_ITERATIONS_PER_PHASE = 6
+DECOMPOSED_MAX_TOTAL_PHASES = 8  # hard ceiling on phases actually run, including repair cycles -- "no infinite decomposition"
+DECOMPOSED_MAX_REPAIR_CYCLES = 2
+
+# finish/escalate are always implicitly allowed by run_agent_loop regardless
+# of allowed_tools, so they're intentionally omitted here.
+_PHASE_TOOLS: dict[str, frozenset[str]] = {
+    "inspect": frozenset({"list_files", "read_file", "grep"}),
+    "implement": frozenset({"list_files", "read_file", "grep", "inspect_diff", "write_file_sandbox", "apply_patch_sandbox"}),
+    "test": frozenset({"list_files", "read_file", "grep", "inspect_diff", "write_file_sandbox", "apply_patch_sandbox", "run_command"}),
+    "repair": frozenset({"list_files", "read_file", "grep", "inspect_diff", "write_file_sandbox", "apply_patch_sandbox", "run_command"}),
+}
+
+
+def _phase_task_text(parent_task: str, phase_name: str, phase_objective: str, prior_summary: str, allowed_tools: frozenset[str] | None) -> str:
+    parts = [
+        "You are working on ONE BOUNDED PHASE of a larger, already-authorized engineering "
+        "objective. Complete ONLY this phase's objective, then call finish with a short summary "
+        "of exactly what you did/found. Do not attempt work that belongs to a later phase.",
+        f"\nOVERALL OBJECTIVE (context only -- do not exceed this phase's scope):\n{parent_task}",
+        f"\nCURRENT PHASE: {phase_name.upper()}",
+        f"\nPHASE OBJECTIVE:\n{phase_objective}",
+    ]
+    # Real incident this addresses: an inspect-phase run tried something
+    # needing write access, got a correct structural refusal (inspect is
+    # deliberately read-only), and escalated with "write permissions are
+    # not available" instead of understanding this is expected phase
+    # scoping -- not a malfunction, and not something to ask a human about.
+    if allowed_tools is not None:
+        parts.append(
+            f"\nTOOL SCOPE FOR THIS PHASE: only {', '.join(sorted(allowed_tools))} (plus finish/escalate) "
+            f"are available. This is DELIBERATE, EXPECTED, and by design for this phase -- not a malfunction. "
+            f"If a tool you'd want isn't listed, that work belongs to a LATER phase of this same job, which "
+            f"will run automatically after this one. Do not escalate just because a tool is unavailable this "
+            f"phase; simply do what this phase's objective actually asks for with the tools you do have, then "
+            f"call finish. Only escalate if the objective genuinely cannot be satisfied even within this phase's "
+            f"real scope and tools."
+        )
+    if prior_summary:
+        parts.append(f"\nVERIFIED PROGRESS SO FAR (from already-completed phases):\n{prior_summary}")
+    parts.append("\nWhen this phase's objective is satisfied, call finish now.")
+    return "\n".join(parts)
+
+
+def _run_phase(
+    phase_name: str, phase_objective: str, workdir: Path, *, parent_task: str,
+    prior_summary: str, model: str, max_iterations: int, timeout_s: int,
+) -> tuple[Any, str, list[str]]:
+    """Runs ONE bounded phase in the SAME sandbox the parent job already
+    owns. Bounded model failover on a retryable outcome (iteration_ceiling_
+    reached/timeout/model_unavailable/error): try the next REAL installed
+    model (_filter_actually_installed(), same real-time check as the
+    whole-job path), never a phantom configured-only one. finish/escalate
+    are always terminal for the phase -- never retried with a different
+    model. Returns (AgentRunResult, model_actually_used, attempted_models)."""
+    allowed = _PHASE_TOOLS.get(phase_name)
+    task_text = _phase_task_text(parent_task, phase_name, phase_objective, prior_summary, allowed)
+    attempted: list[str] = []
+    current_model = model
+    t0 = time.monotonic()
+    while True:
+        attempted.append(current_model)
+        remaining = max(30, timeout_s - int(time.monotonic() - t0))
+        run = run_agent_loop(
+            task_text, workdir, model=current_model, provider="ollama",
+            max_iterations=max_iterations, timeout_s=remaining, allowed_tools=allowed,
+        )
+        if run.final_action in ("finish", "escalate"):
+            return run, current_model, attempted
+        health = local_model_health.check(model=current_model)
+        candidates = local_model_health.engineering_failover_order(exclude=attempted)
+        candidates, _not_installed = _filter_actually_installed(candidates, health.models if health.available else [])
+        if not candidates:
+            return run, current_model, attempted
+        current_model = candidates[0]
+
+
+def submit_job_decomposed(
+    task: str, *, requested_by: str = "unspecified", timeout_s: int = DEFAULT_TIMEOUT_S,
+    founder_approved: bool = False, model: str = DEFAULT_MODEL,
+    max_iterations_per_phase: int = DECOMPOSED_MAX_ITERATIONS_PER_PHASE,
+    validation_config: dict[str, Any] | None = None,
+    on_job_created: Callable[[str], None] | None = None,
+) -> JobResult:
+    """Bounded, phase-decomposed alternative to submit_job() for large/
+    complex objectives. One canonical job_id/sandbox/ledger throughout.
+    Fixed phase sequence: INSPECT -> IMPLEMENT -> TEST -> (deterministic
+    VALIDATE, reusing validation.py exactly as submit_job()'s single-loop
+    path does) -> up to DECOMPOSED_MAX_REPAIR_CYCLES bounded REPAIR phases
+    on a validation failure, re-validating after each. Does NOT support
+    source_paths in this version -- a disclosed, real scope limit, not a
+    silent gap. Never marks a job successful on a phase's own 'finish' call
+    alone; final success is always the deterministic validation+canary+
+    independent_validation pipeline, identically to submit_job()."""
+    fp = job_ledger.task_fingerprint(task)
+    existing = job_ledger.find_active_by_fingerprint(fp)
+    if existing is not None:
+        return _duplicate_result(existing, task, model, requested_by)
+
+    job_id = str(uuid.uuid4())
+    if on_job_created:
+        try:
+            on_job_created(job_id)
+        except Exception:  # noqa: BLE001 — a caller's linking hook must never break job execution
+            pass
+    workdir = JOBS_ROOT / job_id / "workdir"
+    workdir.mkdir(parents=True, exist_ok=True)
+    timeout_s = min(timeout_s, MAX_TIMEOUT_S)
+    job_ledger.create(
+        job_id, task=task, requested_by=requested_by, sandbox_path=str(workdir),
+        model=model, max_iterations=max_iterations_per_phase,
+        submit_params={"decomposed": True, "validation_config": validation_config},
+    )
+    job_ledger.claim(job_id, owner=requested_by)
+    started_at = datetime.now(timezone.utc).isoformat()
+    t0 = time.monotonic()
+
+    try:
+        decision = classify(
+            task_description=task, requested_tools=set(), sandbox_root=workdir,
+            source_paths=[], founder_approved=founder_approved, adapter=OMNI_ENGINEER_ID,
+        )
+        job_ledger.checkpoint(job_id, JobState.AUTHORIZED, risk_class=decision.risk_class.value,
+                               approval_state=decision.approval_state.value,
+                               authority_state="granted" if decision.may_execute else "denied")
+        if not decision.may_execute:
+            job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result="rejected_policy", error_class="authority")
+            result = JobResult(
+                job_id=job_id, task=task, adapter=OMNI_ENGINEER_ID, model=model,
+                risk_class=decision.risk_class.value, approval_state=decision.approval_state.value,
+                status="rejected_policy", workdir=str(workdir), started_at=started_at,
+                ended_at=started_at, duration_s=0.0,
+                files_changed={"added": [], "modified": [], "removed": []},
+                plan_text=None, agent_final_action=None, agent_summary_or_reason=None,
+                retried=False, policy_reasons=decision.reasons,
+            )
+            _finalize(result, requested_by=requested_by)
+            return result
+
+        job_ledger.checkpoint(job_id, JobState.ROUTED, selected_engine=OMNI_ENGINEER_ID)
+
+        before_all = _snapshot(workdir)
+        phases_state: list[dict[str, Any]] = []
+        all_commands: list[str] = []
+        attempted_models_all: list[str] = []
+        prior_summary = ""
+
+        def _record_phase(name: str, objective: str, run, model_used: str, attempted: list[str]) -> dict[str, Any]:
+            entry = {
+                "name": name, "objective": objective[:500],
+                "final_action": run.final_action, "summary": (run.summary_or_reason or "")[:800],
+                "model": model_used, "attempted_models": attempted,
+                "commands_executed": list(run.commands_executed), "ended_at": datetime.now(timezone.utc).isoformat(),
+            }
+            phases_state.append(entry)
+            all_commands.extend(run.commands_executed)
+            for m in attempted:
+                if m not in attempted_models_all:
+                    attempted_models_all.append(m)
+            job_ledger.checkpoint(job_id, JobState.EDITING, phases=list(phases_state),
+                                   note=f"phase {name!r} finished: {run.final_action}")
+            return entry
+
+        escalated = False
+        for phase_name, phase_objective in (
+            ("inspect", "Inspect the existing sandbox and any relevant files. Understand exactly what "
+                        "needs to change to satisfy the overall objective. Call finish with a concise "
+                        "written summary of what you found and what you plan to change."),
+            ("implement", "Make the bounded code changes needed to satisfy the overall objective, based "
+                           "on your inspection. Call finish with a summary of the files you added/changed."),
+            ("test", "Write focused tests for the change you just implemented, then run them with "
+                     "run_command. Call finish with a summary of the tests and whether they passed."),
+        ):
+            if len(phases_state) >= DECOMPOSED_MAX_TOTAL_PHASES:
+                break
+            run, mdl, attempted = _run_phase(
+                phase_name, phase_objective, workdir, parent_task=task, prior_summary=prior_summary,
+                model=model, max_iterations=max_iterations_per_phase,
+                timeout_s=max(30, timeout_s - int(time.monotonic() - t0)),
+            )
+            entry = _record_phase(phase_name, phase_objective, run, mdl, attempted)
+            if run.final_action == "escalate":
+                escalated = True
+                break
+            prior_summary = (prior_summary + f"\n[{phase_name}] {entry['summary']}").strip()
+
+        if escalated:
+            job_ledger.checkpoint(job_id, JobState.ESCALATED, terminal_result="escalated", phases=phases_state,
+                                   attempted_models=attempted_models_all, error_class="model_escalate")
+            result = JobResult(
+                job_id=job_id, task=task, adapter=OMNI_ENGINEER_ID, model=attempted_models_all[-1] if attempted_models_all else model,
+                risk_class=decision.risk_class.value, approval_state=decision.approval_state.value,
+                status="escalated", workdir=str(workdir), started_at=started_at,
+                ended_at=datetime.now(timezone.utc).isoformat(), duration_s=time.monotonic() - t0,
+                files_changed=_diff_snapshots(before_all, _snapshot(workdir)), plan_text=None,
+                agent_final_action="escalate", agent_summary_or_reason=phases_state[-1]["summary"] if phases_state else None,
+                retried=len(attempted_models_all) > 1, commands_executed=all_commands,
+                attempted_models=attempted_models_all,
+            )
+            _finalize(result, requested_by=requested_by)
+            return result
+
+        # Deterministic VALIDATE, identical pipeline to submit_job()'s single-loop path.
+        after = _snapshot(workdir)
+        files_changed = _diff_snapshots(before_all, after)
+        job_ledger.checkpoint(job_id, JobState.VALIDATING, phases=phases_state)
+        vres = validation.validate(workdir, files_changed, config=validation_config)
+
+        repair_cycles = 0
+        while not vres.passed and repair_cycles < DECOMPOSED_MAX_REPAIR_CYCLES and len(phases_state) < DECOMPOSED_MAX_TOTAL_PHASES:
+            repair_cycles += 1
+            repair_objective = (
+                f"Validation FAILED (repair attempt {repair_cycles}/{DECOMPOSED_MAX_REPAIR_CYCLES}). "
+                f"Fix the specific issue(s) below, then call finish.\n{json.dumps(vres.to_json())[:1500]}"
+            )
+            run, mdl, attempted = _run_phase(
+                "repair", repair_objective, workdir, parent_task=task, prior_summary=prior_summary,
+                model=model, max_iterations=max_iterations_per_phase,
+                timeout_s=max(30, timeout_s - int(time.monotonic() - t0)),
+            )
+            entry = _record_phase(f"repair_{repair_cycles}", repair_objective, run, mdl, attempted)
+            if run.final_action == "escalate":
+                job_ledger.checkpoint(job_id, JobState.ESCALATED, terminal_result="escalated", phases=phases_state,
+                                       attempted_models=attempted_models_all, error_class="model_escalate")
+                result = JobResult(
+                    job_id=job_id, task=task, adapter=OMNI_ENGINEER_ID, model=mdl,
+                    risk_class=decision.risk_class.value, approval_state=decision.approval_state.value,
+                    status="escalated", workdir=str(workdir), started_at=started_at,
+                    ended_at=datetime.now(timezone.utc).isoformat(), duration_s=time.monotonic() - t0,
+                    files_changed=files_changed, plan_text=None, agent_final_action="escalate",
+                    agent_summary_or_reason=entry["summary"], retried=len(attempted_models_all) > 1,
+                    commands_executed=all_commands, attempted_models=attempted_models_all,
+                    validation=vres.to_json(),
+                )
+                _finalize(result, requested_by=requested_by)
+                return result
+            prior_summary = (prior_summary + f"\n[repair_{repair_cycles}] {entry['summary']}").strip()
+            after = _snapshot(workdir)
+            files_changed = _diff_snapshots(before_all, after)
+            vres = validation.validate(workdir, files_changed, config=validation_config)
+
+        canary_result = None
+        independent_validation_result = None
+        promotion_eligible = False
+        has_changes = any(files_changed.get(k) for k in ("added", "modified", "removed"))
+        if vres.passed:
+            job_ledger.checkpoint(job_id, JobState.CANARY, validation_result=vres.to_json(), phases=phases_state)
+            cres = validation.validate(workdir, files_changed, config=validation_config)
+            canary_result = cres.to_json()
+            promotion_eligible = bool(cres.passed and has_changes)
+            if promotion_eligible:
+                ivres = independent_validation.recheck(workdir, files_changed, primary_passed=True)
+                independent_validation_result = ivres.to_json()
+                if ivres.ran and ivres.agrees_with_primary is False:
+                    promotion_eligible = False
+
+        ended_at = datetime.now(timezone.utc).isoformat()
+        if not vres.passed:
+            status = "succeeded_validation_failed"
+        elif not canary_result or not canary_result.get("passed"):
+            status = "succeeded_canary_failed"
+        else:
+            status = "succeeded"
+        ledger_state = JobState.COMPLETED if status == "succeeded" else JobState.FAILED
+        job_ledger.checkpoint(
+            job_id, ledger_state, terminal_result=status, phases=phases_state,
+            attempted_models=attempted_models_all, validation_result=vres.to_json(),
+            error_class=None if status == "succeeded" else "validation",
+        )
+        result = JobResult(
+            job_id=job_id, task=task, adapter=OMNI_ENGINEER_ID, model=attempted_models_all[-1] if attempted_models_all else model,
+            risk_class=decision.risk_class.value, approval_state=decision.approval_state.value,
+            status=status, workdir=str(workdir), started_at=started_at, ended_at=ended_at,
+            duration_s=time.monotonic() - t0, files_changed=files_changed, plan_text=None,
+            agent_final_action="finish", agent_summary_or_reason=phases_state[-1]["summary"] if phases_state else None,
+            retried=len(attempted_models_all) > 1, commands_executed=all_commands,
+            attempted_models=attempted_models_all, validation=vres.to_json(), canary=canary_result,
+            promotion_eligible=promotion_eligible, independent_validation=independent_validation_result,
+        )
+        _finalize(result, requested_by=requested_by)
+        return result
+    finally:
+        job_ledger.release(job_id, owner=requested_by)
+
+
+def phases_from_ledger(job_id: str) -> list[dict[str, Any]]:
+    """Read-only: the durable phase history of a decomposed job, straight
+    from its ledger record -- used by resume/inspection, never a second
+    source of truth."""
+    record = job_ledger.load(job_id)
+    return list(record.phases) if record and record.phases else []

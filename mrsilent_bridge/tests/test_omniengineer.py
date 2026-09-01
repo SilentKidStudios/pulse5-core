@@ -1283,6 +1283,206 @@ def test_full_target_loop_live() -> None:
               f"plan.files={plan.files}")
 
 
+# ---- OMNI_GOD_MODE_V1 PHASE 2 -- bounded task decomposition ----------------
+# All monkeypatch harness.run_agent_loop directly (same pattern as
+# test_evolution_advance.py's _ENGINE_RUNNERS patching) so these are fast,
+# deterministic, and spend zero real model calls. Real regression target:
+# job 6978adf2 (18-iteration exhaustion on one undecomposed loop).
+
+import validation as _god2_validation
+
+
+def _god2_fake_run(final_action: str = "finish", summary: str = "did the thing", commands=None) -> agent.AgentRunResult:
+    return agent.AgentRunResult(
+        task="x", sandbox="x", model="qwen3-coder:30b", final_action=final_action,
+        summary_or_reason=summary, commands_executed=commands or [],
+    )
+
+
+def _god2_sequenced_runner(results: list[agent.AgentRunResult]):
+    calls = {"phase_names": []}
+    it = iter(results)
+
+    def runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        calls["phase_names"].append((model, allowed_tools))
+        try:
+            return next(it)
+        except StopIteration:
+            return _god2_fake_run("finish")
+    return runner, calls
+
+
+def test_decomposed_happy_path_records_all_phases_and_succeeds() -> None:
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    runner, calls = _god2_sequenced_runner([_god2_fake_run() for _ in range(3)])
+    harness.run_agent_loop = runner
+    _god2_validation.validate = lambda *a, **k: type("V", (), {"passed": True, "to_json": lambda self: {"passed": True, "checks": []}})()
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: happy path", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+
+    check("happy-path decomposed job succeeds", r.status == "succeeded", r.status)
+    check("all 3 base phases were run (inspect/implement/test)", len(calls["phase_names"]) == 3, calls["phase_names"])
+    record = job_ledger.load(r.job_id)
+    check("ledger.phases has one durable entry per phase run", len(record.phases) == 3, record.phases)
+    check("phases are recorded in the correct order", [p["name"] for p in record.phases] == ["inspect", "implement", "test"], record.phases)
+    check("inspect phase was structurally denied write tools (allowed_tools)",
+          "write_file_sandbox" not in (calls["phase_names"][0][1] or set()), calls["phase_names"][0][1])
+    check("test phase was granted run_command", "run_command" in (calls["phase_names"][2][1] or set()), calls["phase_names"][2][1])
+
+
+def test_decomposed_escalate_stops_immediately_no_later_phases() -> None:
+    original_run = harness.run_agent_loop
+    runner, calls = _god2_sequenced_runner([_god2_fake_run("finish"), _god2_fake_run("escalate", "stuck, need a human")])
+    harness.run_agent_loop = runner
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: escalation", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+
+    check("job status is escalated", r.status == "escalated", r.status)
+    check("only 2 phases ran (inspect, implement) -- test phase never started after escalate",
+          len(calls["phase_names"]) == 2, calls["phase_names"])
+    record = job_ledger.load(r.job_id)
+    check("ledger reflects exactly 2 recorded phases", len(record.phases) == 2, record.phases)
+    check("ledger terminal state is escalated", record.state == job_ledger.JobState.ESCALATED.value, record.state)
+
+
+def test_decomposed_validation_failure_triggers_bounded_repair_then_succeeds() -> None:
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    runner, calls = _god2_sequenced_runner([_god2_fake_run() for _ in range(4)])  # inspect, implement, test, repair_1
+    harness.run_agent_loop = runner
+    validate_calls = {"n": 0}
+
+    def fake_validate(*a, **k):
+        validate_calls["n"] += 1
+        passed = validate_calls["n"] >= 2  # first VALIDATE fails, repair happens, second (post-repair) VALIDATE passes
+        return type("V", (), {"passed": passed, "to_json": lambda self, p=passed: {"passed": p, "checks": []}})()
+    _god2_validation.validate = fake_validate
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: repair cycle", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+
+    check("job succeeds after exactly one repair cycle", r.status == "succeeded", r.status)
+    check("exactly 4 phases ran (inspect, implement, test, repair_1)", len(calls["phase_names"]) == 4, calls["phase_names"])
+    record = job_ledger.load(r.job_id)
+    check("ledger shows the repair_1 phase durably", any(p["name"] == "repair_1" for p in record.phases), record.phases)
+
+
+def test_decomposed_repair_cycles_are_bounded() -> None:
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    runner, calls = _god2_sequenced_runner([_god2_fake_run() for _ in range(10)])
+    harness.run_agent_loop = runner
+    _god2_validation.validate = lambda *a, **k: type("V", (), {"passed": False, "to_json": lambda self: {"passed": False, "checks": []}})()
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: never-passing validation", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+
+    check("job ends as succeeded_validation_failed, not an infinite loop", r.status == "succeeded_validation_failed", r.status)
+    check(f"repair cycles bounded to DECOMPOSED_MAX_REPAIR_CYCLES={harness.DECOMPOSED_MAX_REPAIR_CYCLES}, total phases = 3 base + that many repairs",
+          len(calls["phase_names"]) == 3 + harness.DECOMPOSED_MAX_REPAIR_CYCLES, calls["phase_names"])
+
+
+def test_decomposed_gated_task_never_runs_a_phase() -> None:
+    original_run = harness.run_agent_loop
+    called = {"n": 0}
+    def runner(*a, **k):
+        called["n"] += 1
+        return _god2_fake_run()
+    harness.run_agent_loop = runner
+    try:
+        r = harness.submit_job_decomposed("delete the credentials file and rotate the api_key", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+    check("gated task is rejected_policy before any phase runs", r.status == "rejected_policy", r.status)
+    check("no phase ever called run_agent_loop for a gated task", called["n"] == 0, called["n"])
+
+
+def test_decomposed_phase_state_survives_simulated_crash_and_resume_reads_it() -> None:
+    """No process is actually killed (that would destabilize the live
+    runtime) -- instead, the ledger IS the durable state by construction
+    (checkpointed after every phase via job_ledger.checkpoint, atomic
+    write). This proves the real property that matters: after a phase
+    completes and before the NEXT phase starts, a totally fresh read of the
+    job (phases_from_ledger(), simulating a new process after a crash) sees
+    the completed phase and would not need to repeat it."""
+    original_run = harness.run_agent_loop
+    seen_after_first_phase = {}
+    call_count = {"n": 0}
+
+    def runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        call_count["n"] += 1
+        if call_count["n"] == 2 and not seen_after_first_phase:
+            # This is the SECOND run_agent_loop call (start of the
+            # implement phase) -- phase 1 (inspect) has already been
+            # checkpointed by _record_phase by this point. Simulate "crash
+            # after phase 1, fresh process reads the ledger" right here,
+            # before this (phase 2) call's own result exists.
+            seen_after_first_phase["phases"] = list(job_ledger.load(job_id_holder["id"]).phases)
+        return _god2_fake_run()
+
+    job_id_holder: dict[str, str] = {}
+    original_create = job_ledger.create
+
+    def create_and_capture(job_id, **kw):
+        job_id_holder["id"] = job_id
+        return original_create(job_id, **kw)
+
+    harness.run_agent_loop = runner
+    job_ledger.create = create_and_capture
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: crash-resume evidence", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        job_ledger.create = original_create
+
+    check("job still completed normally (no real crash, just a mid-run durable read)", r.status in ("succeeded", "succeeded_validation_failed", "succeeded_canary_failed"), r.status)
+    check("a fresh ledger read taken BEFORE phase 2 already shows phase 1 durably recorded",
+          seen_after_first_phase.get("phases") and seen_after_first_phase["phases"][0]["name"] == "inspect",
+          seen_after_first_phase.get("phases"))
+    check("that pre-phase-2 read would not need to repeat the already-completed inspect phase",
+          len(seen_after_first_phase.get("phases", [])) == 1, seen_after_first_phase.get("phases"))
+
+
+def test_decomposed_model_failover_within_a_phase_uses_real_installed_model_only() -> None:
+    original_run = harness.run_agent_loop
+    original_check = _mrsilent_test_local_model_health.check
+    original_order = _mrsilent_test_local_model_health.engineering_failover_order
+    attempts = []
+
+    def runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        attempts.append(model)
+        if model == "qwen3-coder:30b":
+            return _god2_fake_run("iteration_ceiling_reached", "burned all iterations")
+        return _god2_fake_run("finish")
+
+    _mrsilent_test_local_model_health.check = lambda **k: type("H", (), {"available": True, "models": ["qwen3-coder:30b", "qwen3.6:27b"]})()
+    _mrsilent_test_local_model_health.engineering_failover_order = lambda exclude=None: [m for m in ["qwen3-coder:30b", "qwen3.6:27b", "gpt-oss:20b"] if m not in (exclude or [])]
+    harness.run_agent_loop = runner
+    try:
+        run, mdl, attempted = harness._run_phase(
+            "inspect", "objective", Path(tempfile.mkdtemp()), parent_task="x", prior_summary="",
+            model="qwen3-coder:30b", max_iterations=6, timeout_s=60,
+        )
+    finally:
+        harness.run_agent_loop = original_run
+        _mrsilent_test_local_model_health.check = original_check
+        _mrsilent_test_local_model_health.engineering_failover_order = original_order
+
+    check("phase failed over from qwen3-coder:30b to the next REAL installed model (qwen3.6:27b), not the unavailable gpt-oss:20b",
+          attempted == ["qwen3-coder:30b", "qwen3.6:27b"], attempted)
+    check("phase ultimately finished cleanly after failover", run.final_action == "finish", run.final_action)
+
+
 if __name__ == "__main__":
     test_system_prompt_matches_seeded_source_guard_v2()
     test_write_and_read_roundtrip()
@@ -1322,6 +1522,13 @@ if __name__ == "__main__":
     test_h4_agent_loop_uses_normalized_backend_seam()
     test_harness_rejects_a_protected_source_path()
     test_resume_never_recopies_source_paths_after_partial_edits()
+    test_decomposed_happy_path_records_all_phases_and_succeeds()
+    test_decomposed_escalate_stops_immediately_no_later_phases()
+    test_decomposed_validation_failure_triggers_bounded_repair_then_succeeds()
+    test_decomposed_repair_cycles_are_bounded()
+    test_decomposed_gated_task_never_runs_a_phase()
+    test_decomposed_phase_state_survives_simulated_crash_and_resume_reads_it()
+    test_decomposed_model_failover_within_a_phase_uses_real_installed_model_only()
     test_full_target_loop_live()
 
     print()
