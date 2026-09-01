@@ -2,6 +2,7 @@
   "created_utc": "2026-09-01T19:23:00Z",
   "campaign": "COMPLETION_CONTROLLER_MICRO_JOB_1E_SINGLE_WRITE_RETRY",
   "baseline_commit": "92c94ed",
+  "microjob1e_commit": "5a266fc",
   "status": "FAIL. Per user direction, attempted 'option A' (read everything first, then make ONE single, already-complete write, eliminating the two-write pattern entirely). Result: the model read all 4 files perfectly, in the correct order -- then called finish() directly, without ever calling write_file_sandbox at all. This sharpens rather than contradicts the standing diagnosis.",
 
   "role_boundary_respected": "Claude submitted one attempt through the real, certified omniengineer_harness.submit_job() path, independently inspected the actual sandbox file listing and the actual turn-by-turn tool-call sequence, and is reporting the exact result. The artifact was not created or repaired by Claude.",
