@@ -2,6 +2,7 @@
   "created_utc": "2026-09-01T18:56:30Z",
   "campaign": "COMPLETION_CONTROLLER_MICRO_JOB_CAMPAIGN",
   "baseline_commit": "77df069",
+  "microjob1_commit": "35bbddc",
   "status": "MICRO_JOB_1 FAILED TWICE (per the explicit two-strike rule) -- STOPPED, not retried a third time. This is a different, more benign failure mode than the two prior full-controller attempts: no mock, no hallucinated API, no modification of any staged reference file. The model simply never called the required write_file_sandbox action, both times, despite an explicit, unambiguous instruction that a prose answer in finish() does not satisfy the task.",
 
   "role_boundary_respected": "Micro-Job 1 was pure read-only inspection with zero implementation content -- there was nothing for Claude to 'silently repair' even in principle. Claude submitted both attempts through the real, certified omniengineer_harness.submit_job() path, independently inspected the actual sandbox file listing and the real turn-by-turn tool-call record (not just the summary) after each, and is reporting the exact failure rather than writing the contract artifact itself or inventing a workaround.",
