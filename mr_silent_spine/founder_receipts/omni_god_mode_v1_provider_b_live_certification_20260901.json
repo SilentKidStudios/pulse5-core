@@ -2,6 +2,7 @@
   "created_utc": "2026-09-01T17:50:00Z",
   "campaign": "OMNI_GOD_MODE_V1_PROVIDER_B_LIVE_PROOF_ON_RENDER_FORGE_01",
   "baseline_commit": "81f2aff",
+  "certification_commit": "9cc9b9b",
   "status": "PASS -- Provider B's requirements ARE genuinely co-located on render-forge-01 (the actual GPU/Ollama host); a real, live cross-provider failover canary succeeded end-to-end there. This closes the final OMNI_GOD_MODE_V1 gap. OMNI_GOD_MODE_V1_EVIDENCE_BASED_PERCENT=100.",
 
   "boundary_respected": "No second Claude session was opened -- render-forge-01 was inspected and operated exclusively via non-interactive SSH command execution over the existing, already-established Tailscale connection from pulse5-core-01 (root@100.105.150.104), the same mechanism used for the read-only inspection steps. No models downloaded. No new provider installed. No paid resources enabled (everything exercised is local/free ollama + local/free provider_b). No credential changes. No destructive actions -- the real ollama daemon on render-forge-01 was never touched, stopped, or queried destructively; only the harness's own model-call function was monkeypatched to simulate a controlled failure, the same safe technique this codebase's own test suite already establishes as standard practice. Founder gates (authority_policy.py, promotion.py) were not touched or invoked to promote anything. Completion-controller work was not implemented or retried.",
