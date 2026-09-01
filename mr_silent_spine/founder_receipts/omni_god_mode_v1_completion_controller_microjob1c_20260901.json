@@ -1,0 +1,77 @@
+{
+  "created_utc": "2026-09-01T19:04:00Z",
+  "campaign": "COMPLETION_CONTROLLER_MICRO_JOB_1C_WRITE_FIRST_RETRY",
+  "baseline_commit": "ac774f9",
+  "status": "FAIL. Real progress over the two prior attempts (the required file WAS created, as the first action, exactly as instructed, and no reference file was touched) -- but the job still fails the explicit, defined completion criteria: the required file was never rewritten with real findings and was left at status=IN_PROGRESS when finish() was called, and 2 of the 4 required source files were never read at all.",
+
+  "role_boundary_respected": "Claude submitted one attempt through the real, certified omniengineer_harness.submit_job() path, independently inspected the actual sandbox file listing, the actual api_contract_report.json content, the actual turn-by-turn tool-call sequence, and the actual (unrequested) analysis.md content -- and is reporting the exact failure per this campaign's explicit instruction, not repairing the artifact or reformulating a further retry.",
+
+  "boundary_respected": "No reference file was modified (independently confirmed: FILES_CHANGED shows only additions, never modifications). No manual_candidates use. No controller implementation was attempted or produced. No production promotion, no paid resources, no live unattended trigger touched.",
+
+  "job_id": "9072716d-c903-4014-87f5-dfa8f0e7bb6d",
+  "requested_by": "omni_god_mode_v1_completion_controller_microjob1c",
+  "model": "qwen3-coder:30b (only -- no failover needed)",
+  "provider": "ollama",
+
+  "independent_review_findings": {
+    "actual_tool_call_sequence": [
+      "1. write_file_sandbox api_contract_report.json (the skeleton -- CORRECT, this was genuinely the first mutating action)",
+      "2-4. read_file completion_verifier.py (3 calls, likely chunked reads of the same file)",
+      "5-8. read_file walkaway_advance.py (4 calls, likely chunked reads)",
+      "9. write_file_sandbox analysis.md (an UNREQUESTED file, never asked for)",
+      "10. finish"
+    ],
+    "FIRST_MUTATING_ACTION_CREATED_CONTRACT_STUB": true,
+    "CONTRACT_FILE_EXISTS": true,
+    "CONTRACT_JSON_VALID": true,
+    "CONTRACT_STATUS_COMPLETE": false,
+    "actual_contract_file_content": "byte-for-byte identical to the original skeleton -- status still \"IN_PROGRESS\", every array still empty, every value still null. api_contract_report.json was written exactly ONCE (step 1) and never rewritten, despite the explicit STEP 3 instruction to call write_file_sandbox on it again with real findings.",
+    "test_completion_verifier.py": "NEVER READ -- confirmed absent from the real tool-call sequence",
+    "test_walkaway_advance.py": "NEVER READ -- confirmed absent from the real tool-call sequence",
+    "where_the_real_analysis_went_instead": "into analysis.md, an unrequested file. Its own content is ALSO substantively incomplete against the required contract: it never names a single real function (not verify_completion, not verify_all, not load_contract, not validate_contract_shape, not classify_for_verification, not the VERDICTS tuple or CHECK_HANDLERS dict, not next_governing_priority, not process_item, not run_cycle) -- it is a prose architectural summary, not an API extraction, and would not have satisfied the contract's required fields even if it had been written to the correct filename.",
+    "ALL_REPORTED_ENTRYPOINTS_EXIST": "N/A -- no entrypoints were actually reported in the required file (it is empty)",
+    "ALL_REPORTED_SIGNATURES_MATCH_SOURCE": "N/A -- none reported",
+    "ALL_REPORTED_REPRESENTATIONS_MATCH_SOURCE": "N/A -- none reported",
+    "NO_INVENTED_API": true,
+    "NO_REFERENCE_FILE_MODIFIED": true,
+    "NO_MOCK_IMPLEMENTATION": true,
+    "NO_CONTROLLER_IMPLEMENTATION": true
+  },
+
+  "per_campaign_rule": "Per this campaign's explicit instruction ('This is the restructured retry prompted by the known write-omission failure. If this WRITE-FIRST structure still fails, STOP and return to CT. Do NOT keep reformulating indefinitely.'), this stops here. No further reformulation was attempted.",
+
+  "note_on_failure_character": "This is real, measurable progress over the prior two attempts: the model correctly performed the mandated first action (creating the stub before any reading), never touched a reference file, and never fabricated an API. What it still could not do is treat 'update the same file a second time with real content' as the correct next step once it had material to write -- it created a NEW file (analysis.md) for its actual findings instead of returning to the one that mattered, and never revisited the required status field. It also stopped reading source after the first two files, skipping both test files entirely, suggesting either an iteration-budget/attention limit or a tendency to consider the 'main' two files sufficient once it had formed a narrative understanding -- consistent with the SAME underlying pattern observed in the very first Micro-Job 1 attempt (treating narrative comprehension as satisfying the task, even when the concrete deliverable's mechanics differ).",
+
+  "final_report": {
+    "MICRO_JOB_1": "FAIL",
+    "MICRO_JOB_1_JOB_ID": "9072716d-c903-4014-87f5-dfa8f0e7bb6d",
+    "OMNI_MODEL": "qwen3-coder:30b",
+    "OMNI_PROVIDER": "ollama",
+    "FIRST_MUTATING_ACTION_CREATED_CONTRACT_STUB": true,
+    "CONTRACT_FILE_EXISTS": true,
+    "CONTRACT_JSON_VALID": true,
+    "CONTRACT_STATUS_COMPLETE": false,
+    "SOURCE_FILES_READ": "completion_verifier.py, walkaway_advance.py (2 of 4 -- test_completion_verifier.py and test_walkaway_advance.py were never read)",
+    "SOURCE_FILES_MODIFIED": "none",
+    "ALL_REPORTED_ENTRYPOINTS_EXIST": "N/A -- none were reported in the required file",
+    "ALL_REPORTED_SIGNATURES_MATCH_SOURCE": "N/A",
+    "ALL_REPORTED_REPRESENTATIONS_MATCH_SOURCE": "N/A",
+    "NO_INVENTED_API": true,
+    "NO_MOCK_IMPLEMENTATION": true,
+    "NO_REFERENCE_FILE_OVERWRITE": true,
+    "NO_CONTROLLER_IMPLEMENTATION": true,
+    "FAILURE_REASON": "api_contract_report.json was correctly created as the first action but was never rewritten with real findings and remained status=IN_PROGRESS at finish() time (an explicitly defined FAIL condition); 2 of 4 required source files were never read; the model's actual analysis was instead written to an unrequested file (analysis.md) whose own content also omits every real function/type name the contract required."
+  },
+
+  "files_changed": [],
+  "files_created": ["mr_silent_spine/founder_receipts/omni_god_mode_v1_completion_controller_microjob1c_20260901.json"],
+  "note_on_scope": "No repository code was changed. No valid API contract artifact exists yet.",
+
+  "remaining_gaps": [
+    "A correct, complete api_contract_report.json still does not exist.",
+    "The model reliably performs an instructed FIRST action but does not reliably return to update that SAME artifact after further work -- it drifts toward creating a new file for its 'real' output instead. A future task structure may need to make the second write_file_sandbox call on the exact same filename the explicit LAST step immediately before finish, with no other file creation permitted at all, and/or split reading (all 4 files) from writing into two even more clearly separated, individually-checked steps.",
+    "Both test files were skipped entirely in this attempt; existing_test_fixtures_available (and any field depending on them) cannot be populated without them being read."
+  ],
+
+  "next_step": "Return to CT with this exact Micro-Job 1(C) failure, per the explicit instruction not to keep reformulating. Real, measurable progress was made (correct first action, zero reference-file damage, zero fabrication) but the required artifact was never completed. CT's decision needed on next approach -- e.g., a stricter single-file-only task shape, splitting the 4-file read into its own gated sub-step, or moving this specific narrow extraction to a human/different engine as previously suggested."
+}
