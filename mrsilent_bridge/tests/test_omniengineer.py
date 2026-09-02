@@ -1598,6 +1598,62 @@ def test_submit_job_auto_dispatches_complex_task_to_submit_job_decomposed() -> N
     check("complex task routed to submit_job_decomposed()", calls == {"simple": 0, "decomposed": 1}, calls)
 
 
+def test_decomposed_phase_iteration_ceiling_is_ten_and_finite() -> None:
+    """Founder-authorized bounded test-limit increase (GOD MODE JOURNEY 10.7
+    walk-away acceptance run, 2026-09-02): DECOMPOSED_MAX_ITERATIONS_PER_PHASE
+    raised from 6 to 10. Proves the new ceiling actually reaches every real
+    phase call (not silently ignored or unbounded) and remains a genuine,
+    small, finite bound rather than an accidental disable."""
+    check("the ceiling is a genuine finite bound, not unlimited",
+          isinstance(harness.DECOMPOSED_MAX_ITERATIONS_PER_PHASE, int) and 0 < harness.DECOMPOSED_MAX_ITERATIONS_PER_PHASE <= 20,
+          harness.DECOMPOSED_MAX_ITERATIONS_PER_PHASE)
+    check("the authorized test value is exactly 10", harness.DECOMPOSED_MAX_ITERATIONS_PER_PHASE == 10,
+          harness.DECOMPOSED_MAX_ITERATIONS_PER_PHASE)
+
+    original_run = harness.run_agent_loop
+    seen_max_iterations = []
+
+    def runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        seen_max_iterations.append(max_iterations)
+        return _god2_fake_run("finish")
+
+    harness.run_agent_loop = runner
+    try:
+        harness.submit_job_decomposed("synthetic test: iteration ceiling propagation", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+
+    check("submit_job_decomposed's real phase calls receive the new ceiling (10), not the old default (6) or unbounded",
+          bool(seen_max_iterations) and all(m == 10 for m in seen_max_iterations), seen_max_iterations)
+
+
+def test_submit_job_auto_decomposed_path_still_wired_to_the_module_ceiling() -> None:
+    """submit_job_auto() is the single sanctioned entry point every real
+    caller (task_router.py, evolution/advance.py's _run_omni_engineer())
+    uses -- it hardcodes max_iterations_per_phase=DECOMPOSED_MAX_ITERATIONS_PER_PHASE
+    with no per-call override, so the module constant is the effective
+    ceiling for every decomposed job, system-wide. Proves that wiring still
+    holds after the bump: a real submit_job_auto() call on a genuinely
+    complex/decomposition-eligible task threads the current module constant
+    through to the real phase calls, not a stale hardcoded literal."""
+    original_run = harness.run_agent_loop
+    seen_max_iterations = []
+
+    def runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        seen_max_iterations.append(max_iterations)
+        return _god2_fake_run("finish")
+
+    harness.run_agent_loop = runner
+    try:
+        harness.submit_job_auto(_PHASE3_SYNTHETIC_COMPLEX_TASK, requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+
+    check("submit_job_auto's decomposed path uses the current module ceiling",
+          bool(seen_max_iterations) and all(m == harness.DECOMPOSED_MAX_ITERATIONS_PER_PHASE for m in seen_max_iterations),
+          seen_max_iterations)
+
+
 def _god2_fake_jobresult() -> "harness.JobResult":
     return harness.JobResult(
         job_id="fake", task="x", adapter="omni_engineer_v1", model="qwen3-coder:30b",
@@ -2069,6 +2125,8 @@ if __name__ == "__main__":
     test_classify_complexity_multi_stage_synthetic_task_is_eligible()
     test_submit_job_auto_dispatches_simple_task_to_submit_job()
     test_submit_job_auto_dispatches_complex_task_to_submit_job_decomposed()
+    test_decomposed_phase_iteration_ceiling_is_ten_and_finite()
+    test_submit_job_auto_decomposed_path_still_wired_to_the_module_ceiling()
     test_context_staging_excludes_secret_paths_by_default()
     test_context_staging_excludes_manual_candidates_and_backups_by_default()
     test_decomposed_source_paths_are_staged_and_excluded_ones_are_recorded_not_copied()

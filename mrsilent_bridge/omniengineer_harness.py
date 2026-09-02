@@ -1475,7 +1475,7 @@ def _task30b2_compute_preflight(
 # behavior identically to a normal submit_job() run -- nothing new to wire.
 # ============================================================
 
-DECOMPOSED_MAX_ITERATIONS_PER_PHASE = 6
+DECOMPOSED_MAX_ITERATIONS_PER_PHASE = 10  # Founder-authorized bounded test-limit increase (GOD MODE JOURNEY 10.7 walk-away acceptance, 2026-09-02): was 6. submit_job_auto() is the single sanctioned entry point for every real caller and hardcodes this module constant with no per-call override, so this remains a genuine global default, not a per-job override -- still a small, finite, enforced bound (see test_decomposed_phase_iteration_ceiling_is_ten_and_finite), not unlimited.
 DECOMPOSED_MAX_TOTAL_PHASES = 8  # hard ceiling on phases actually run, including repair cycles -- "no infinite decomposition"
 DECOMPOSED_MAX_REPAIR_CYCLES = 2
 
