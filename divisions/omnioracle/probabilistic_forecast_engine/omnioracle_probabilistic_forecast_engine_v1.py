@@ -26,6 +26,20 @@ from deterministic_forecast_core import (
     canonical_forecast_result,
 )
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "real_signal_connector"))
+import live_system_runtime_connector_v1 as _live_runtime_connector
+
+# Only domains where local machine telemetry (load/disk/memory/service health) is
+# semantically relevant evidence get fused with the live signal -- using it for
+# e.g. "swarm_coordination" or "strategic_expansion" would be evidence-laundering
+# (real but irrelevant data inflating an unrelated forecast's evidence_count).
+LIVE_SIGNAL_RELEVANT_DOMAINS = {"runtime_autonomy"}
+
+# Deterministic, bounded adjustment to base_score from the live signal's risk_level.
+# Never large enough to flip a forecast on its own -- it nudges a synthetic base
+# score that must already exist from other evidence or the domain's own heuristic.
+_LIVE_RISK_ADJUSTMENT = {"low": 0.05, "medium": 0.0, "high": -0.15}
+
 ROOT=Path("/opt/pulse5-core")
 ORACLE=ROOT/"divisions/omnioracle"
 
@@ -114,6 +128,34 @@ def forecast_domain(domain, seed_override=None, min_evidence=1):
         base_score = heuristic_base_score(domain)
         contributors = ["heuristic_base_score(domain) -- no consensus/ledger evidence found"]
 
+    # Live signal fusion (Priority 3, INDEPENDENT_GAP_CLOSURE campaign): only for
+    # domains where local machine telemetry is genuinely relevant evidence, and only
+    # when the reading is fresh -- a stale or unavailable live signal is honestly
+    # excluded and reported, never silently reused or treated as current.
+    live_signal_info = {"applicable": domain in LIVE_SIGNAL_RELEVANT_DOMAINS}
+    if live_signal_info["applicable"]:
+        live_reading = _live_runtime_connector.latest_signal()
+        fresh = _live_runtime_connector.is_fresh(live_reading)
+        live_signal_info.update({
+            "status": live_reading.get("status"),
+            "fresh": fresh,
+            "signal_id": live_reading.get("signal_id"),
+            "risk_level": live_reading.get("risk_level"),
+        })
+        if fresh and live_reading.get("status") == "OK":
+            adjustment = _LIVE_RISK_ADJUSTMENT.get(live_reading.get("risk_level"), 0.0)
+            base_score = max(0.0, min(1.0, round(base_score + adjustment, 4)))
+            evidence_count += 1
+            contributors.append(
+                f"live_system_runtime_connector (real machine telemetry, signal_id={live_reading.get('signal_id')}, "
+                f"risk_level={live_reading.get('risk_level')})"
+            )
+        else:
+            live_signal_info["excluded_reason"] = (
+                "stale" if live_reading.get("status") == "STALE"
+                else live_reading.get("status", "unavailable")
+            )
+
     seed = seed_override if seed_override is not None else content_seed(domain, len(consensus_matches), len(ledger_matches))
     mc = seeded_monte_carlo(base_score, seed=seed, n_samples=200, spread=0.10)
 
@@ -133,6 +175,7 @@ def forecast_domain(domain, seed_override=None, min_evidence=1):
             "ledger_entries_matched": len(ledger_matches),
             "simulation_files_total_on_disk": len(simulation_files),
             "council_files_total_on_disk": len(council_files),
+            "live_signal": live_signal_info,
         },
         scenario_assumptions={"future_window_days": 30, "domain": domain},
         model_or_engine_contributors=contributors,
