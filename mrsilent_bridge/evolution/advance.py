@@ -331,7 +331,50 @@ def _resolve_prior_attempt(p: proposal_mod.Proposal, *, requested_by: str) -> tu
         return None, f"resumed stale job {last_job_id} (policy={policy.value}) — did not complete cleanly (status={resumed.status}); will try a fresh attempt if budget remains", False
 
     if status == "stale_not_resumable":
-        reason = "already auto-resumed the maximum number of times" if record and record.resume_count >= job_ledger.MAX_RESUME_ATTEMPTS else f"recovery policy={policy.value if policy else 'unknown'}"
+        # DEFECT_SIGNAL=07387e2947ac43d5: a job that is definitively
+        # stale/dead-owner (is_stale() already confirmed this) but has
+        # exhausted its bounded MAX_RESUME_ATTEMPTS budget was previously
+        # left non-terminal forever here -- classify() correctly refuses to
+        # auto-resume it again (that bound exists on purpose), but nothing
+        # ever durably reconciled the RECORD itself, so
+        # find_active_by_fingerprint() kept reporting it "active" and every
+        # subsequent fresh attempt was deduped against it: a permanent
+        # mutated=false stalemate, the exact failure mode a second dead
+        # owner (this time mid-resume) reproduces.
+        #
+        # NEVER applies to policy == FOUNDER_REQUIRED: a job awaiting
+        # Founder approval when it died stays awaiting Founder approval --
+        # "no recovery may bypass authority" (see job_ledger.py's module
+        # docstring). Only the genuinely-exhausted-budget case is
+        # superseded here.
+        exhausted_budget = policy == RecoveryPolicy.ESCALATE and record is not None and record.resume_count >= job_ledger.MAX_RESUME_ATTEMPTS
+        reason = "already auto-resumed the maximum number of times" if exhausted_budget else f"recovery policy={policy.value if policy else 'unknown'}"
+        if exhausted_budget:
+            # B/C/D/E: durably reconcile the stale attempt, release/supersede
+            # its lock ownership, and independently reread canonical state
+            # to reconfirm it's still genuinely dead — using the SAME
+            # atomic claim/checkpoint/release primitives resume_job() uses,
+            # so a job any live process still legitimately owns is never
+            # raced or superseded (fail-closed: if the claim fails, this is
+            # skipped entirely, unchanged from the old behavior).
+            fresh = job_ledger.load(last_job_id)
+            if fresh is not None and job_ledger.is_stale(fresh) and fresh.resume_count >= job_ledger.MAX_RESUME_ATTEMPTS:
+                claimed, _broke = job_ledger.claim_or_break_stale(last_job_id, owner=requested_by)
+                if claimed:
+                    try:
+                        job_ledger.checkpoint(
+                            last_job_id, JobState.FAILED,
+                            terminal_result="stale_resume_exhausted", error_class="stale_owner_unresumable",
+                            note=f"durably reconciled: stale/dead-owner and auto-resume budget exhausted "
+                                 f"({fresh.resume_count}/{job_ledger.MAX_RESUME_ATTEMPTS}) — superseded by a fresh implementation attempt",
+                        )
+                    finally:
+                        job_ledger.release(last_job_id, owner=requested_by)
+        # F/G: only now does the caller proceed to fresh routing -- by this
+        # point the old record is either freshly terminal (dedup no longer
+        # sees it) or, if we couldn't safely claim it, genuinely still
+        # someone else's live concern (dedup correctly still suppresses a
+        # duplicate, unchanged from prior behavior).
         return None, f"prior job {last_job_id} is stale but not resumable ({reason}); will try a fresh attempt if budget remains", False
 
     # "failure" or "unknown"

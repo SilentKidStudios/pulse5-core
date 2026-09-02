@@ -479,3 +479,80 @@ def test_corrupt_lock_evidence_is_ambiguous_and_fails_closed():
     finally:
         job_ledger._lock_path(job_id).unlink(missing_ok=True)
         job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result="test_fixture_cleanup", error_class="synthetic_test")
+
+
+# ---- DEFECT_SIGNAL=07387e2947ac43d5 -----------------------------------------
+#
+# Root cause: a job that is definitively stale/dead-owner (is_stale()
+# confirms it) but has exhausted its bounded MAX_RESUME_ATTEMPTS budget hits
+# _job_terminal_status()'s "stale_not_resumable" branch. classify() correctly
+# refuses to auto-resume it AGAIN (that bound is intentional), but nothing
+# ever durably reconciled the ledger RECORD itself -- _resolve_prior_attempt()
+# just fell through to a fresh implementation attempt while the old record
+# stayed non-terminal forever, so find_active_by_fingerprint() kept reporting
+# it "active" and every subsequent fresh attempt was deduped against it: a
+# permanent mutated=false stalemate. This is what a job dying a SECOND time
+# (once during its original run, once again during its one bounded resume)
+# reproduces. Fixed by durably terminalizing the record -- via the same
+# atomic claim/checkpoint/release primitives resume_job() uses, so a job
+# anyone still legitimately owns is never raced -- before permitting fresh
+# routing, EXCEPT when the reason is FOUNDER_REQUIRED (approval-pending),
+# which must never be auto-terminalized: "no recovery may bypass authority."
+
+def test_defect_07387e_exhausted_stale_job_is_durably_terminalized_before_fresh_routing(cleanup_proposals, cleanup_jobs):
+    """A-E/G: proven stale/dead-owner + exhausted resume budget -> durably
+    reconciled to a real terminal state -> lock released -> no longer
+    blocks dedup. Exercises _resolve_prior_attempt() directly -- the exact
+    function that had the ordering gap."""
+    work_id = _make_proposal(cleanup_proposals, risk_score="low", status=proposal_mod.ProposalStatus.PROPOSED)
+    job_id = _make_job(cleanup_jobs, state=JobState.EDITING, selected_engine="claude_code", resume_count=1)  # budget already exhausted
+    proposal_mod.append_implementation_job(work_id, job_id, engine="claude_code")
+    _plant_dead_lock(job_id, seconds_ago=5)  # dead owner, mid-second (resumed) attempt
+
+    fp = job_ledger.load(job_id).task_fingerprint
+    assert job_ledger.find_active_by_fingerprint(fp) is not None, "sanity: still blocking before the fix's reconciliation runs"
+
+    p = proposal_mod.load(work_id)
+    job, note, refuse = advance_mod._resolve_prior_attempt(p, requested_by="th3_mcp.recover_work")
+
+    # B/C: durably reconciled to a real terminal state, lock released
+    reconciled = job_ledger.load(job_id)
+    assert reconciled.state == JobState.FAILED.value
+    assert reconciled.terminal_result == "stale_resume_exhausted"
+    assert job_ledger.lock_status(job_id)["held"] is False
+
+    # G: STALE_NO_LONGER_BLOCKS_FRESH_DEDUP
+    assert job_ledger.find_active_by_fingerprint(fp) is None
+
+    # F: caller is correctly told nothing was reused (job=None) but NOT to refuse -- fresh routing is now genuinely permitted
+    assert job is None
+    assert refuse is False
+    assert "will try a fresh attempt" in note
+
+    # D/IDEMPOTENT_RECOVERY: calling again must not re-terminalize or error --
+    # the record is already terminal, so _job_terminal_status short-circuits
+    # to "failure" long before this branch is even reached again.
+    job2, note2, refuse2 = advance_mod._resolve_prior_attempt(proposal_mod.load(work_id), requested_by="th3_mcp.recover_work")
+    assert job2 is None and refuse2 is False
+    assert job_ledger.load(job_id).state == JobState.FAILED.value  # unchanged, not re-terminalized
+
+
+def test_defect_07387e_founder_required_job_is_never_auto_terminalized(cleanup_proposals, cleanup_jobs):
+    """Founder gate preservation: a job that died while genuinely awaiting
+    Founder approval must NEVER be auto-terminalized by the new supersede
+    logic, even though it is also stale/dead-owner with resume_count
+    already at the bound -- a human must still decide. This is the one
+    case within 'stale_not_resumable' the fix must NOT touch."""
+    work_id = _make_proposal(cleanup_proposals, risk_score="low", status=proposal_mod.ProposalStatus.PROPOSED)
+    job_id = _make_job(cleanup_jobs, state=JobState.AUTHORIZED, selected_engine="claude_code", resume_count=1)
+    job_ledger.checkpoint(job_id, JobState.AUTHORIZED, approval_state="pending_approval")
+    proposal_mod.append_implementation_job(work_id, job_id, engine="claude_code")
+    _plant_dead_lock(job_id, seconds_ago=5)
+
+    p = proposal_mod.load(work_id)
+    job, note, refuse = advance_mod._resolve_prior_attempt(p, requested_by="th3_mcp.recover_work")
+
+    reconciled = job_ledger.load(job_id)
+    assert reconciled.state == JobState.AUTHORIZED.value, "a Founder-gated job must never be silently terminalized"
+    assert reconciled.terminal_result is None
+    assert job is None
