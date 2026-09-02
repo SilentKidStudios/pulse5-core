@@ -374,3 +374,108 @@ def test_owls_defect_dead_proposal_lock_no_longer_leaves_recovery_stuck(cleanup_
         "a dead advancer's orphaned proposal-level lock must be broken, not refused forever"
     assert any(s["stage"] == "concurrency_claim" and s["outcome"] == "ok" for s in result.stages)
     assert job_ledger.lock_status(lock_key)["held"] is False
+
+
+# ---- DEFECT_SIGNAL=389f05d585044a8b -----------------------------------------
+#
+# Root cause: job_ledger.is_stale() was PURELY heartbeat-based. checkpoint()
+# refreshes a job's `heartbeat` field on EVERY call -- including the one
+# resume_job() makes the instant a resume attempt STARTS. If that resuming
+# process then crashes (e.g. an infra failure) before its next checkpoint,
+# the ledger's heartbeat looks "fresh" for up to STALE_AFTER_S afterward even
+# though the owner is now definitively dead -- while the job's LOCK FILE
+# (held by that exact, now-dead pid) is unambiguous, directly verifiable
+# proof of death. is_stale() never consulted the lock at all, so
+# classify()/_job_terminal_status() trusted the weaker, misleading heartbeat
+# signal and reported the job "active_not_stale" -- contradicting the lock's
+# own alive=false/stale=true evidence. Fixed by making is_stale() treat a
+# HELD lock's pid-liveness as authoritative (overriding heartbeat in both
+# directions) and only falling back to heartbeat when no lock is held.
+
+def test_owls_defect_fresh_heartbeat_but_dead_lock_pid_is_still_classified_stale(cleanup_proposals, cleanup_jobs, monkeypatch):
+    """A: lock_alive=false + lock_stale=true + eligible stale owner ->
+    deterministic stale classification -> governed durable reconciliation.
+    Reproduces the EXACT reported contradiction: heartbeat is left FRESH
+    (as if the owner had just checkpointed) while the lock's pid is dead."""
+    work_id = _make_proposal(cleanup_proposals, risk_score="low", status=proposal_mod.ProposalStatus.PROPOSED)
+    job_id = _make_job(cleanup_jobs, state=JobState.EDITING, selected_engine="claude_code")  # heartbeat left fresh, deliberately
+    proposal_mod.append_implementation_job(work_id, job_id, engine="claude_code")
+
+    _plant_dead_lock(job_id, seconds_ago=5)  # claimed moments ago -- staleness can ONLY come from the dead pid, not lock age
+    lock = job_ledger.lock_status(job_id)
+    assert lock["alive"] is False and lock["stale"] is True, "sanity: reproduces OWLS's WORK_STATUS_LOCK_ALIVE=false / LOCK_STALE=true"
+
+    # THE FIX under direct test: lock evidence must override a merely-fresh heartbeat.
+    assert job_ledger.is_stale(job_ledger.load(job_id)) is True
+
+    def fake_run(cmd, **kwargs):
+        workdir = Path(kwargs["cwd"])
+        (workdir / "recovered.txt").write_text("recovered")
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"result": "ok"}', stderr="")
+    monkeypatch.setattr(advance_mod.bridge.subprocess, "run", fake_run)
+
+    task_fingerprint = job_ledger.load(job_id).task_fingerprint
+    result = T.recover_work(work_id, reason="TEST-ONLY: reproduce and verify DEFECT_SIGNAL=389f05d585044a8b")
+
+    # DETERMINISTIC_RECONCILIATION: never classified as prior_job_still_active
+    assert result["prior_implementation_job"]["is_stale"] is True
+    assert result["decision"]["blocked_reason"] != "prior_job_still_active"
+    assert not any("still appears active and not stale" in s.get("detail", "") for s in result["decision"]["stages"])
+
+    # DURABLE_RECONCILIATION
+    assert result["mutated"] is True
+    reconciled = job_ledger.load(job_id)
+    assert reconciled.state in {s.value for s in job_ledger.TERMINAL_STATES}
+
+    # E: STALE_NO_LONGER_BLOCKS_FRESH_DEDUP
+    assert job_ledger.find_active_by_fingerprint(task_fingerprint) is None
+
+    # D: IDEMPOTENT_RECOVERY
+    result2 = T.recover_work(work_id)
+    assert result2["mutated"] is False
+    assert job_ledger.load(job_id).resume_count == reconciled.resume_count
+
+
+def test_live_locked_job_protected_even_if_heartbeat_looks_stale(cleanup_proposals, cleanup_jobs, monkeypatch):
+    """B: a genuinely live prior job -> recover_work refuses mutation. The
+    other direction of the same fix: a lock held by a genuinely LIVE pid
+    must protect the job even when its heartbeat happens to look old (e.g.
+    one unusually long tool call between checkpoints) -- lock evidence is
+    authoritative in both directions, not only the dead-pid direction."""
+    def _must_not_be_called(*a, **k):
+        raise AssertionError("resume_job must not run against a job a live process still holds the lock on")
+    monkeypatch.setattr(advance_mod.bridge, "resume_job", _must_not_be_called)
+
+    work_id = _make_proposal(cleanup_proposals, risk_score="low", status=proposal_mod.ProposalStatus.PROPOSED)
+    job_id = _make_job(cleanup_jobs, state=JobState.EDITING, selected_engine="claude_code", stale_seconds_ago=2000)  # heartbeat LOOKS stale
+    proposal_mod.append_implementation_job(work_id, job_id, engine="claude_code")
+    assert job_ledger.claim(job_id, owner="genuinely_alive_worker") is True  # this test process's own real, live pid
+    try:
+        result = T.recover_work(work_id)
+        assert result["mutated"] is False
+        assert result["prior_implementation_job"]["is_stale"] is False, \
+            "a live-held lock must override a stale-looking heartbeat, not merely coexist with the contradiction"
+    finally:
+        job_ledger.release(job_id, owner="genuinely_alive_worker")
+        job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result="test_fixture_cleanup", error_class="synthetic_test")
+
+
+def test_corrupt_lock_evidence_is_ambiguous_and_fails_closed():
+    """C: contradictory/ambiguous authoritative evidence -> fail closed.
+    An unreadable lock file proves nothing about the owner either way --
+    must never be treated as license to recover."""
+    job_id = f"test-lock-corrupt-{uuid.uuid4()}"
+    workdir = job_ledger.JOBS_ROOT / job_id / "workdir"
+    workdir.mkdir(parents=True, exist_ok=True)
+    job_ledger.create(job_id, task="TEST-ONLY: corrupt lock must fail closed", requested_by="test", sandbox_path=str(workdir))
+    job_ledger.checkpoint(job_id, JobState.EDITING)
+    job_ledger._lock_path(job_id).write_text("{not valid json")
+    try:
+        status = job_ledger.lock_status(job_id)
+        assert status["held"] is True
+        assert status.get("corrupt") is True
+        assert job_ledger.is_stale(job_ledger.load(job_id)) is False, \
+            "ambiguous/corrupt lock evidence must fail closed, never be treated as proof of staleness"
+    finally:
+        job_ledger._lock_path(job_id).unlink(missing_ok=True)
+        job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result="test_fixture_cleanup", error_class="synthetic_test")

@@ -305,8 +305,31 @@ def find_active_by_fingerprint(fingerprint: str) -> LedgerRecord | None:
 
 
 def is_stale(record: LedgerRecord, *, stale_after_s: int = STALE_AFTER_S) -> bool:
+    """DEFECT_SIGNAL=389f05d585044a8b: a job's ledger `heartbeat` field gets
+    refreshed by EVERY checkpoint() call, including the one that starts a
+    resume attempt -- so if that resuming process itself then crashes
+    (e.g. an infra failure mid-_execute()) before reaching another
+    checkpoint, the heartbeat looks "fresh" for up to stale_after_s
+    afterward even though the owner is now definitively dead. Meanwhile the
+    job's LOCK FILE (if one is currently held) carries a directly
+    verifiable fact -- is that exact pid still alive right now -- that is
+    strictly stronger evidence than a timestamp either side could have
+    refreshed. When a lock is held, its pid-liveness is authoritative and
+    OVERRIDES the heartbeat in both directions: a live pid means NOT stale
+    even if the heartbeat happens to look old (protects a genuinely slow
+    but alive worker — see STALE_AFTER_S's own "generous" comment above),
+    and a dead pid means stale even if the heartbeat was just refreshed
+    moments before the owner crashed. Only when NO lock is currently held
+    (never claimed, or already cleanly released) does this fall back to
+    the heartbeat-only check, exactly as before."""
     if record.state in {s.value for s in TERMINAL_STATES}:
         return False
+    lock = lock_status(record.job_id)
+    if lock.get("held"):
+        # corrupt/unreadable lock info can't prove liveness either way --
+        # default to "alive" (i.e. NOT stale) so genuinely ambiguous
+        # evidence fails closed rather than being treated as recoverable.
+        return not lock.get("alive", True)
     try:
         hb = datetime.fromisoformat(record.heartbeat)
     except (ValueError, TypeError):
