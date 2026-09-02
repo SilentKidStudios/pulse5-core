@@ -98,6 +98,7 @@ from authority_policy import classify
 from job_ledger import JobState, RecoveryPolicy
 from local_model_bridge import DEFAULT_MODEL, OLLAMA_BASE_URL
 from omniengineer_agent import MAX_ITERATIONS, run_agent_loop
+from omniengineer_agent import MAX_SINGLE_SHOT_FILES, run_single_shot_patch
 
 BRIDGE_ROOT = Path(__file__).resolve().parent
 JOBS_ROOT = BRIDGE_ROOT / "jobs"
@@ -501,6 +502,161 @@ def submit_job(
         allowed_tools=frozenset(allowed_tools) if allowed_tools is not None else None,
         copy_source_paths=True,
     )
+
+
+def submit_job_single_shot(
+    task: str,
+    *,
+    requested_by: str = "unspecified",
+    timeout_s: int = DEFAULT_TIMEOUT_S,
+    founder_approved: bool = False,
+    model: str = DEFAULT_MODEL,
+    validation_config: dict[str, Any] | None = None,
+    on_job_created: Callable[[str], None] | None = None,
+    source_paths: list[str] | None = None,
+    allowed_paths: frozenset[str] | None = None,
+    max_files: int = MAX_SINGLE_SHOT_FILES,
+) -> JobResult:
+    """SINGLE_SHOT_PATCH_STRATEGY_V1 (Founder-authorized, 2026-09-02) — a
+    fundamentally different, EXPLICITLY OPT-IN execution strategy. NEVER
+    called by submit_job_auto()'s automatic routing and NEVER the default
+    for any existing caller (task_router.py, evolution/advance.py); a
+    caller must name this function directly, the same way a caller must
+    already name submit_job_decomposed() directly to bypass submit_job_
+    auto()'s complexity classification. run_agent_loop()'s multi-turn tool
+    loop remains fully available and unchanged for every other caller.
+
+    Deliberately simpler than _execute()/submit_job()'s shared body: no
+    cross-provider failover, no multi-model retry-on-failure, no per-
+    iteration checkpointing loop — the whole point of "single shot" is
+    exactly ONE bounded model request with no autonomous continuation.
+    Reuses the SAME authority_policy.classify() gate, the SAME
+    context_staging default-exclusion filter, the SAME job_ledger
+    lifecycle states, and the SAME validation.validate() gate every other
+    Omni Engineer execution path already goes through — only the actual
+    implementation step (run_single_shot_patch() instead of
+    agent.run_agent_loop()) differs.
+
+    `allowed_paths` is REQUIRED and is a stricter, single-shot-only
+    allowlist of relative paths the returned patch may touch — independent
+    of, and narrower than, whatever else ends up staged from source_paths."""
+    if not allowed_paths:
+        raise ValueError("submit_job_single_shot requires a non-empty allowed_paths allowlist")
+
+    fp = job_ledger.task_fingerprint(task)
+    existing = job_ledger.find_active_by_fingerprint(fp)
+    if existing is not None:
+        return _duplicate_result(existing, task, model, requested_by)
+
+    job_id = str(uuid.uuid4())
+    if on_job_created:
+        try:
+            on_job_created(job_id)
+        except Exception:  # noqa: BLE001 — a caller's linking hook must never break job execution
+            pass
+    workdir = JOBS_ROOT / job_id / "workdir"
+    workdir.mkdir(parents=True, exist_ok=True)
+    timeout_s = min(timeout_s, MAX_TIMEOUT_S)
+    all_source_paths = [Path(p) for p in (source_paths or [])]
+    staged_source_paths, excluded_source_paths = _stage_context_source_paths(all_source_paths)
+
+    job_ledger.create(
+        job_id, task=task, requested_by=requested_by, sandbox_path=str(workdir), model=model,
+        submit_params={"strategy": "single_shot_patch", "validation_config": validation_config,
+                       "source_paths": _json_safe_submit_value(source_paths or [], field="source_paths"),
+                       "allowed_paths": sorted(allowed_paths),
+                       "context_staging_excluded": excluded_source_paths},
+    )
+    job_ledger.claim(job_id, owner=requested_by)
+    started_at = datetime.now(timezone.utc).isoformat()
+    t0 = time.monotonic()
+
+    try:
+        decision = classify(
+            task_description=task, requested_tools=set(), sandbox_root=workdir,
+            source_paths=all_source_paths, founder_approved=founder_approved, adapter=OMNI_ENGINEER_ID,
+        )
+        job_ledger.checkpoint(job_id, JobState.AUTHORIZED, risk_class=decision.risk_class.value,
+                               approval_state=decision.approval_state.value,
+                               authority_state="granted" if decision.may_execute else "denied")
+
+        if not decision.may_execute:
+            job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result="rejected_policy", error_class="authority")
+            result = JobResult(
+                job_id=job_id, task=task, adapter=OMNI_ENGINEER_ID, model=model,
+                risk_class=decision.risk_class.value, approval_state=decision.approval_state.value,
+                status="rejected_policy", workdir=str(workdir),
+                started_at=started_at, ended_at=started_at, duration_s=0.0,
+                files_changed={"added": [], "modified": [], "removed": []},
+                plan_text=None, agent_final_action=None, agent_summary_or_reason=None, retried=False,
+                policy_reasons=decision.reasons,
+            )
+            _finalize(result, requested_by=requested_by)
+            return result
+
+        job_ledger.checkpoint(job_id, JobState.ROUTED, selected_engine=OMNI_ENGINEER_ID)
+
+        import shutil as _shutil
+        for src in staged_source_paths:
+            dest = _source_sandbox_destination(workdir, src)
+            if src.is_dir():
+                _shutil.copytree(src, dest, dirs_exist_ok=True)
+            elif src.is_file():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                _shutil.copy2(src, dest)
+
+        job_ledger.checkpoint(job_id, JobState.SANDBOX_READY, model=model)
+        before = _snapshot(workdir)
+        job_ledger.checkpoint(job_id, JobState.EDITING, note="single-shot patch request (exactly one model call)")
+
+        run = run_single_shot_patch(
+            task, workdir, model=model, provider="ollama", timeout_s=timeout_s,
+            allowed_paths=allowed_paths, max_files=max_files,
+        )
+
+        after = _snapshot(workdir)
+        added = sorted(set(after) - set(before))
+        modified = sorted(k for k in (set(before) & set(after)) if before[k] != after[k])
+        removed = sorted(set(before) - set(after))
+        files_changed = {"added": added, "modified": modified, "removed": removed}
+
+        status = "succeeded" if run.final_action == "finish" else run.final_action
+        validation_result: dict[str, Any] | None = None
+        promotion_eligible = False
+
+        if status == "succeeded" and (added or modified or removed):
+            job_ledger.checkpoint(job_id, JobState.VALIDATING)
+            vres = validation.validate(workdir, files_changed, config=validation_config)
+            validation_result = vres.to_json()
+            promotion_eligible = vres.passed
+            if promotion_eligible:
+                job_ledger.checkpoint(job_id, JobState.PROMOTION_CANDIDATE, validation_result=validation_result,
+                                       promotion_eligible=True, files_touched=files_changed)
+                job_ledger.checkpoint(job_id, JobState.COMPLETED, terminal_result="succeeded")
+            else:
+                status = "succeeded_validation_failed"
+                job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result=status, error_class="validation",
+                                       validation_result=validation_result)
+        else:
+            status = status if status != "succeeded" else "succeeded_validation_failed"
+            job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result=status, error_class="infra")
+
+        result = JobResult(
+            job_id=job_id, task=task, adapter=OMNI_ENGINEER_ID, model=run.model,
+            risk_class=decision.risk_class.value, approval_state=decision.approval_state.value,
+            status=status, workdir=str(workdir),
+            started_at=started_at, ended_at=run.ended_at, duration_s=time.monotonic() - t0,
+            files_changed=files_changed, plan_text=None,
+            agent_final_action=run.final_action, agent_summary_or_reason=run.summary_or_reason,
+            retried=False, turns=run.turns, commands_executed=run.commands_executed,
+            policy_reasons=decision.reasons, validation=validation_result,
+            promotion_eligible=promotion_eligible, provider=run.provider,
+            worker_backend="local_model",
+        )
+        _finalize(result, requested_by=requested_by)
+        return result
+    finally:
+        job_ledger.release(job_id, owner=requested_by)
 
 
 def submit_job_auto(

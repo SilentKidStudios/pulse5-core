@@ -1068,3 +1068,156 @@ def _finish(task, sandbox, model, provider, final_action, summary_or_reason, tur
         model_calls=model_calls,
         started_at=started_at, ended_at=ended_at, duration_s=time.monotonic() - t0,
     )
+
+
+# ============================================================
+# SINGLE_SHOT_PATCH_STRATEGY_V1 (Founder-authorized, 2026-09-02): a
+# fundamentally different, EXPLICITLY OPT-IN execution strategy alongside
+# run_agent_loop() above -- never silently used by it, never wired into
+# submit_job_auto()'s automatic routing. Where run_agent_loop() is a
+# multi-turn tool-calling agent (inspect/edit/test freely, up to
+# max_iterations), this makes exactly ONE model request asking for a
+# complete, bounded patch representation up front -- no further model
+# calls, no autonomous retry, no shell/tool-loop access for the model.
+#
+# BLEND_NOT_REPLACE: reuses every existing safety primitive rather than
+# reimplementing any of them. The returned patch is applied via the SAME
+# _execute_tool() -> _tool_write_file_sandbox()/_tool_apply_patch_sandbox()
+# path run_agent_loop() itself uses, so path-traversal rejection, protected/
+# secret-marker rejection, the seeded-whole-file-replacement guard, and the
+# per-file/per-patch resource budgets (_safe_path, MAX_FILE_SIZE_CHARS,
+# MAX_PATCH_GENERATED_CHARS) are identical, unduplicated code -- this
+# module adds only prompt construction, response parsing, and the
+# single-shot-specific allowed_paths allowlist (STRICTER than the agent
+# loop: only the exact paths this one job was scoped to touch, not every
+# staged file). Chosen response format is structured JSON (old_string/
+# new_string), not a unified diff -- the same "far more reliable for a 30B
+# local model to generate correctly than diff hunks with line offsets"
+# reasoning _tool_apply_patch_sandbox's own docstring already documents,
+# reused rather than re-litigated.
+
+MAX_SINGLE_SHOT_FILES = 5  # bounded file count for one patch response
+
+SINGLE_SHOT_SYSTEM_PROMPT = """You are OmniEngineer, generating ONE complete, bounded patch for a small task. There is no follow-up turn, no tool loop, and no chance to ask questions or see errors -- get it right in this one response. Respond with EXACTLY ONE JSON object and nothing else, in this shape:
+
+{{"files": [
+  {{"path": "relative/path.py", "op": "patch", "old_string": "EXACT existing text to replace", "new_string": "replacement text"}},
+  {{"path": "relative/new_file.py", "op": "create", "content": "full file content"}}
+]}}
+
+Rules:
+- "op":"patch" requires old_string to match EXACTLY ONCE, verbatim (including whitespace), in the CURRENT file content shown below -- it edits an EXISTING file surgically. Never use "patch" to replace a whole file's content as old_string.
+- "op":"create" is ONLY for a file that does not already exist yet -- never use it to overwrite an existing file.
+- You may touch at most {max_files} files, and ONLY these exact paths: {allowed_paths}. Any other path will be refused.
+- Generate the complete, correct patch in this single response -- there is no follow-up turn to fix mistakes.
+"""
+
+
+def _parse_single_shot_patch(raw: str) -> dict[str, Any] | None:
+    for candidate in (raw, _extract_balanced_json_object(raw)):
+        if not candidate:
+            continue
+        try:
+            obj = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            repaired = _repair_tool_call_json(candidate)
+            if repaired is None:
+                continue
+            try:
+                obj = json.loads(repaired)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(obj, dict) and isinstance(obj.get("files"), list):
+            return obj
+    return None
+
+
+def run_single_shot_patch(
+    task: str,
+    sandbox: Path,
+    *,
+    model: str = DEFAULT_MODEL,
+    provider: str = "ollama",
+    timeout_s: int | None = None,
+    allowed_paths: frozenset[str],
+    max_files: int = MAX_SINGLE_SHOT_FILES,
+) -> AgentRunResult:
+    """SINGLE_SHOT_PATCH_STRATEGY_V1 entry point. Exactly ONE model request;
+    no iteration, no autonomous retry -- callers that want a second attempt
+    must explicitly call this again with a fresh sandbox/job, never
+    implicit. `allowed_paths` is REQUIRED: a stricter, single-shot-only
+    allowlist beyond what sandbox staging itself already enforces -- a
+    patch entry naming any other path is refused, even if that path is
+    otherwise present and staged in the sandbox."""
+    started_at = datetime.now(timezone.utc).isoformat()
+    t0 = time.monotonic()
+    before_snapshot = _snapshot(sandbox)
+    commands_executed: list[str] = []
+    turns: list[TurnRecord] = []
+
+    call_timeout = timeout_s or MODEL_CALL_TIMEOUT_S
+    prompt = SINGLE_SHOT_SYSTEM_PROMPT.format(max_files=max_files, allowed_paths=sorted(allowed_paths))
+    prompt += f"\n\nTASK:\n{task}\n"
+    for rel in sorted(allowed_paths):
+        p = sandbox / rel
+        if p.exists() and p.is_file():
+            prompt += f"\n\nCURRENT CONTENT of {rel}:\n{p.read_text(errors='replace')[:MAX_FILE_SIZE_CHARS]}\n"
+    prompt += "\nRespond with your one complete patch now.\n"
+
+    try:
+        raw = _call_model_backend(prompt, model=model, provider=provider, timeout_s=call_timeout)
+    except urllib.error.URLError as e:
+        return _finish(task, sandbox, model, provider, "model_unavailable", f"{provider} request failed: {e}",
+                        turns, commands_executed, 1, started_at, t0)
+    except Exception as e:  # noqa: BLE001
+        return _finish(task, sandbox, model, provider, "error", f"unexpected error calling model via {provider}: {e!r}",
+                        turns, commands_executed, 1, started_at, t0)
+
+    patch = _parse_single_shot_patch(raw)
+    if patch is None:
+        turns.append(TurnRecord(1, "single_shot_patch", {}, "", "malformed: response was not a parseable {\"files\": [...]} JSON object", False))
+        return _finish(task, sandbox, model, provider, "error", "model returned a malformed/unparseable single-shot patch response",
+                        turns, commands_executed, 1, started_at, t0)
+
+    files = patch.get("files", [])
+    if not isinstance(files, list) or not files:
+        turns.append(TurnRecord(1, "single_shot_patch", {}, "", "malformed: 'files' was empty or not a list", False))
+        return _finish(task, sandbox, model, provider, "error", "model returned no files to patch",
+                        turns, commands_executed, 1, started_at, t0)
+    if len(files) > max_files:
+        turns.append(TurnRecord(1, "single_shot_patch", {}, "", f"refused: {len(files)} files exceeds max_files={max_files}", False))
+        return _finish(task, sandbox, model, provider, "escalate", f"patch touched {len(files)} files, exceeding the bounded max_files={max_files}",
+                        turns, commands_executed, 1, started_at, t0)
+
+    any_applied = False
+    for i, entry in enumerate(files, start=1):
+        if not isinstance(entry, dict):
+            turns.append(TurnRecord(i, "single_shot_patch", {}, "", "refused: file entry was not an object", False))
+            continue
+        rel = entry.get("path", "")
+        op = entry.get("op", "")
+        if rel not in allowed_paths:
+            turns.append(TurnRecord(i, "single_shot_patch", entry if isinstance(entry, dict) else {}, "",
+                                     f"refused: {rel!r} is not in this job's authorized single-shot paths {sorted(allowed_paths)}", False))
+            continue
+        if op == "patch":
+            call = ToolCall(thought="single-shot patch", tool="apply_patch_sandbox",
+                             args={"path": rel, "old_string": entry.get("old_string", ""), "new_string": entry.get("new_string", "")})
+        elif op == "create":
+            call = ToolCall(thought="single-shot create", tool="write_file_sandbox",
+                             args={"path": rel, "content": entry.get("content", "")})
+        else:
+            turns.append(TurnRecord(i, "single_shot_patch", entry, "", f"refused: unknown op {op!r} (must be 'patch' or 'create')", False))
+            continue
+        # Reuses the EXACT same tool executor (and therefore the exact same
+        # _safe_path/seeded-file/resource-budget enforcement) run_agent_loop()
+        # itself calls -- no duplicated safety logic.
+        ok, result_text = _execute_tool(call, sandbox, before_snapshot, commands_executed)
+        turns.append(TurnRecord(i, call.tool, call.args, call.thought, result_text[:1000], ok))
+        any_applied = any_applied or ok
+
+    final_action = "finish" if any_applied else "error"
+    successes = sum(1 for t in turns if t.ok)
+    summary = (f"single-shot patch applied {successes}/{len(turns)} file operation(s)" if any_applied
+               else "no file operation in the single-shot patch succeeded")
+    return _finish(task, sandbox, model, provider, final_action, summary, turns, commands_executed, 1, started_at, t0)

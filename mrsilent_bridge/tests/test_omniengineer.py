@@ -16,6 +16,7 @@ Run: python3 tests/test_omniengineer.py
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -1319,6 +1320,207 @@ def test_provider_b_path_is_structurally_unaffected_by_ollama_num_ctx() -> None:
           "provider_b_bridge.generate(" in source, source)
 
 
+# ---- SINGLE_SHOT_PATCH_STRATEGY_V1 (Founder-authorized, 2026-09-02) --------
+
+def _single_shot_sandbox(seed_files: dict[str, str]) -> Path:
+    sandbox = Path(tempfile.mkdtemp(prefix="single_shot_test_"))
+    for rel, content in seed_files.items():
+        p = sandbox / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    return sandbox
+
+
+def test_single_shot_mode_is_explicitly_selected_not_silently_global() -> None:
+    """1: single-shot mode is opt-in only. submit_job_auto()'s automatic
+    routing (task_router.py, evolution/advance.py's real callers) never
+    reaches run_single_shot_patch()/submit_job_single_shot() -- a caller
+    must name it directly, exactly like submit_job_decomposed() already
+    requires today."""
+    import inspect
+    auto_source = inspect.getsource(harness.submit_job_auto)
+    check("submit_job_auto() never references run_single_shot_patch or submit_job_single_shot",
+          "run_single_shot_patch" not in auto_source and "submit_job_single_shot" not in auto_source, auto_source)
+    check("submit_job_single_shot is a real, independently-callable function",
+          callable(harness.submit_job_single_shot))
+
+
+def test_normal_multi_turn_agent_loop_remains_available() -> None:
+    """2: the existing multi-turn tool-calling agent loop is completely
+    unchanged and still the default/only path for every existing caller."""
+    check("run_agent_loop still exists and is callable", callable(agent.run_agent_loop))
+    check("submit_job (simple, non-decomposed) still routes through run_agent_loop, not the single-shot path",
+          "run_agent_loop" in __import__("inspect").getsource(harness._execute)
+          and "run_single_shot_patch" not in __import__("inspect").getsource(harness._execute))
+
+
+def test_single_shot_rejects_a_path_outside_the_allowed_paths_allowlist() -> None:
+    """3: only authorized staged paths may be patched -- a path not in
+    allowed_paths is refused even though it is otherwise a normal relative
+    path with no traversal/protected-marker issue."""
+    sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
+    original = agent._call_model_backend
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: json.dumps({
+        "files": [{"path": "b.py", "op": "create", "content": "Y = 2\n"}]
+    })
+    try:
+        run = agent.run_single_shot_patch("test", sandbox, allowed_paths=frozenset({"a.py"}))
+    finally:
+        agent._call_model_backend = original
+    check("out-of-allowlist path is refused, not applied", not (sandbox / "b.py").exists())
+    check("final_action reflects nothing succeeded", run.final_action == "error", run.final_action)
+
+
+def test_single_shot_rejects_path_traversal() -> None:
+    """4: path traversal is rejected -- inherited unchanged from
+    _safe_path()/_tool_apply_patch_sandbox(), the same primitive
+    run_agent_loop() itself relies on."""
+    sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
+    original = agent._call_model_backend
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: json.dumps({
+        "files": [{"path": "../escape.py", "op": "create", "content": "Y = 2\n"}]
+    })
+    try:
+        agent.run_single_shot_patch("test", sandbox, allowed_paths=frozenset({"../escape.py"}))
+    finally:
+        agent._call_model_backend = original
+    check("traversal path never escapes the sandbox", not (sandbox.parent / "escape.py").exists())
+
+
+def test_single_shot_rejects_a_protected_secret_path() -> None:
+    """5: protected/secret paths are rejected -- inherited unchanged from
+    _safe_path()'s GATED_PATH_MARKERS check."""
+    sandbox = _single_shot_sandbox({})
+    original = agent._call_model_backend
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: json.dumps({
+        "files": [{"path": "secrets/key.py", "op": "create", "content": "X = 1\n"}]
+    })
+    try:
+        run = agent.run_single_shot_patch("test", sandbox, allowed_paths=frozenset({"secrets/key.py"}))
+    finally:
+        agent._call_model_backend = original
+    check("protected/secret-marked path is never written", not (sandbox / "secrets" / "key.py").exists())
+    check("nothing succeeded", run.final_action == "error", run.final_action)
+
+
+def test_single_shot_rejects_malformed_model_output_safely() -> None:
+    """6: malformed model output is rejected safely -- no crash, a clean
+    error final_action, nothing applied."""
+    sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
+    original = agent._call_model_backend
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: "this is not JSON at all {{{"
+    try:
+        run = agent.run_single_shot_patch("test", sandbox, allowed_paths=frozenset({"a.py"}))
+    finally:
+        agent._call_model_backend = original
+    check("malformed output yields a clean error, not a crash", run.final_action == "error", run.final_action)
+    check("nothing was changed", (sandbox / "a.py").read_text() == "X = 1\n")
+
+
+def test_single_shot_rejects_out_of_scope_patch_exceeding_max_files() -> None:
+    """7: out-of-scope patches (touching more files than the bounded
+    max_files) are rejected safely, nothing applied."""
+    sandbox = _single_shot_sandbox({})
+    allowed = frozenset({f"f{i}.py" for i in range(4)})
+    original = agent._call_model_backend
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: json.dumps({
+        "files": [{"path": f"f{i}.py", "op": "create", "content": "X = 1\n"} for i in range(4)]
+    })
+    try:
+        run = agent.run_single_shot_patch("test", sandbox, allowed_paths=allowed, max_files=3)
+    finally:
+        agent._call_model_backend = original
+    check("nothing was written when the patch exceeds max_files",
+          not any((sandbox / f"f{i}.py").exists() for i in range(4)))
+    check("final_action is escalate, a safe refusal not a crash", run.final_action == "escalate", run.final_action)
+
+
+def test_single_shot_validation_failure_does_not_promote() -> None:
+    """8: validation failure does not promote work -- a syntactically
+    broken file gets written (the model's patch itself succeeds
+    mechanically) but validation.validate()'s python_compile check fails
+    it, so promotion_eligible stays False and status reflects the failure,
+    through the exact same governed validation gate every other execution
+    path uses."""
+    original_call = agent._call_model_backend
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: json.dumps({
+        "files": [{"path": "broken.py", "op": "create", "content": "def broken(:\n"}]
+    })
+    try:
+        result = harness.submit_job_single_shot(
+            "TEST-ONLY: single-shot validation-failure gate", requested_by="test",
+            allowed_paths=frozenset({"broken.py"}),
+        )
+    finally:
+        agent._call_model_backend = original_call
+    check("the mechanically-broken file was actually written to the job's own sandbox",
+          "broken.py" in result.files_changed.get("added", []), result.files_changed)
+    check("promotion_eligible is False on a validation failure", result.promotion_eligible is False, result.promotion_eligible)
+    check("status reflects the validation failure, never a bare success",
+          result.status == "succeeded_validation_failed", result.status)
+
+
+def test_single_shot_paid_resource_gate_preserved() -> None:
+    """9: the paid-resource gate remains intact -- submit_job_single_shot
+    hardcodes provider='ollama' with no parameter through which a caller
+    could select a paid provider; the underlying model call is the exact
+    same free/local _call_ollama() path."""
+    import inspect
+    source = inspect.getsource(harness.submit_job_single_shot)
+    check("submit_job_single_shot always calls run_single_shot_patch with provider='ollama'",
+          'provider="ollama"' in source, source)
+    check("submit_job_single_shot's signature exposes no provider/paid-route override parameter",
+          "provider" not in inspect.signature(harness.submit_job_single_shot).parameters, source)
+
+
+def test_single_shot_founder_promotion_gate_preserved() -> None:
+    """10: the Founder production-promotion gate remains intact --
+    submit_job_single_shot never reaches PROMOTED or calls promotion.py;
+    it stops, like every other engine, at PROMOTION_CANDIDATE at most."""
+    import inspect
+    source = inspect.getsource(harness.submit_job_single_shot)
+    check("submit_job_single_shot never references PROMOTED or promotion.py's promote function",
+          "ProposalStatus.PROMOTED" not in source and "promotion.promote(" not in source, source)
+    check("the only lifecycle states this function checkpoints toward are PROMOTION_CANDIDATE/COMPLETED, never PROMOTED",
+          "JobState.PROMOTION_CANDIDATE" in source and "JobState.COMPLETED" in source, source)
+
+
+def test_single_shot_path_also_sends_the_bounded_num_ctx() -> None:
+    """11: num_ctx remains explicitly bounded at 32768 for this Ollama path
+    too -- run_single_shot_patch() reuses _call_model_backend()/
+    _call_ollama() exactly like run_agent_loop() does, so the num_ctx fix
+    applies automatically, with no separate/duplicated configuration."""
+    import urllib.request as _urlreq
+
+    captured: dict = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"response": json.dumps({"files": [{"path": "a.py", "op": "patch", "old_string": "X = 1", "new_string": "X = 2"}]})}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        captured["data"] = json.loads(req.data.decode())
+        return _FakeResponse()
+
+    sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
+    original_urlopen = _urlreq.urlopen
+    _urlreq.urlopen = fake_urlopen
+    try:
+        agent.run_single_shot_patch("test", sandbox, model="qwen3-coder:30b", allowed_paths=frozenset({"a.py"}))
+    finally:
+        _urlreq.urlopen = original_urlopen
+
+    check("the single-shot path's real Ollama request also carries options.num_ctx",
+          captured.get("data", {}).get("options", {}).get("num_ctx") == agent.OLLAMA_NUM_CTX,
+          captured.get("data"))
+
+
 # ---- integration tests (live Ollama call — genuinely proven, not mocked) ---
 
 def test_full_target_loop_live() -> None:
@@ -2198,6 +2400,17 @@ if __name__ == "__main__":
     test_submit_job_auto_decomposed_path_still_wired_to_the_module_ceiling()
     test_ollama_request_carries_explicit_finite_num_ctx()
     test_provider_b_path_is_structurally_unaffected_by_ollama_num_ctx()
+    test_single_shot_mode_is_explicitly_selected_not_silently_global()
+    test_normal_multi_turn_agent_loop_remains_available()
+    test_single_shot_rejects_a_path_outside_the_allowed_paths_allowlist()
+    test_single_shot_rejects_path_traversal()
+    test_single_shot_rejects_a_protected_secret_path()
+    test_single_shot_rejects_malformed_model_output_safely()
+    test_single_shot_rejects_out_of_scope_patch_exceeding_max_files()
+    test_single_shot_validation_failure_does_not_promote()
+    test_single_shot_paid_resource_gate_preserved()
+    test_single_shot_founder_promotion_gate_preserved()
+    test_single_shot_path_also_sends_the_bounded_num_ctx()
     test_context_staging_excludes_secret_paths_by_default()
     test_context_staging_excludes_manual_candidates_and_backups_by_default()
     test_decomposed_source_paths_are_staged_and_excluded_ones_are_recorded_not_copied()
