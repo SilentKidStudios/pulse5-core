@@ -291,11 +291,23 @@ def test_probabilistic_forecast_fails_closed_for_unknown_domain_no_evidence():
     assert result["confidence"] is None
 
 
-def test_probabilistic_forecast_deterministic_with_explicit_seed():
+def test_probabilistic_forecast_deterministic_with_explicit_seed(tmp_path, monkeypatch):
     pfe = _import_engine("probabilistic_forecast_engine", "omnioracle_probabilistic_forecast_engine_v1.py", "pfe_test2")
+    # forecast_domain now registers its own ledger entry as it runs (Part D: immutable
+    # forecast identity for calibration), which would otherwise change evidence_count
+    # for a second back-to-back call to the same domain. Isolate LEDGER to a frozen
+    # empty snapshot re-created before each call so both calls see identical inputs.
+    isolated_ledger = tmp_path / "ledger_entries"
+    isolated_ledger.mkdir()
+    monkeypatch.setattr(pfe, "LEDGER", isolated_ledger)
+
     r1 = pfe.forecast_domain("runtime_autonomy", seed_override=555, min_evidence=0)
+    for f in isolated_ledger.glob("*.json"):
+        f.unlink()
     r2 = pfe.forecast_domain("runtime_autonomy", seed_override=555, min_evidence=0)
+
     r1.pop("timestamp"); r2.pop("timestamp")
+    r1.pop("forecast_id"); r2.pop("forecast_id")
     assert r1 == r2
 
 

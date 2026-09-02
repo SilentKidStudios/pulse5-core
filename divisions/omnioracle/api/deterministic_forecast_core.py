@@ -149,6 +149,17 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def forecast_id(*parts: str, timestamp: str) -> str:
+    """Immutable identity for one forecast: stable for calibration to reference later
+    (forecast_outcome_verifier/calibration.py:record_real_outcome uses this as the
+    forecast_ledger prediction_id). Includes the timestamp so repeated identical-input
+    forecasts at different times get distinct identities -- a real outcome must attach
+    to the specific forecast instance it confirms or refutes, not to "whatever the
+    latest one with this content happens to be"."""
+    joined = "|".join(str(p) for p in parts) + f"|{timestamp}"
+    return "FCID_" + hashlib.sha256(joined.encode()).hexdigest()[:16]
+
+
 def canonical_forecast_result(*, forecast, evidence_inputs, scenario_assumptions,
                                model_or_engine_contributors, mc: MonteCarloResult,
                                evidence_count: int, min_evidence: int = 1,
@@ -156,16 +167,20 @@ def canonical_forecast_result(*, forecast, evidence_inputs, scenario_assumptions
                                cross_source_agreement: Optional[float] = None,
                                contradiction_flags: int = 0, synthetic_provenance: bool = True,
                                calibration_status: str = "uncalibrated_no_real_outcomes_yet",
-                               timestamp: Optional[str] = None) -> dict:
+                               timestamp: Optional[str] = None, id_parts: tuple = ()) -> dict:
     """Assemble the canonical Omni Oracle forecast result schema. Fails closed
     (status=INSUFFICIENT_DATA, confidence=None) when evidence_count < min_evidence,
-    rather than inventing a plausible-looking number."""
+    rather than inventing a plausible-looking number. Every OK result carries a
+    forecast_id -- an immutable identity a later real outcome can be recorded against
+    via forecast_outcome_verifier/calibration.py."""
     ts = timestamp or _now()
     reproducibility = {"deterministic": True, "seed": mc.seed, "n_samples": mc.n_samples}
+    fid = forecast_id(*id_parts, mc.seed, timestamp=ts)
 
     if evidence_count < min_evidence:
         return {
             "schema_version": SCHEMA_VERSION,
+            "forecast_id": fid,
             "status": "INSUFFICIENT_DATA",
             "forecast": None,
             "confidence": None,
@@ -191,6 +206,7 @@ def canonical_forecast_result(*, forecast, evidence_inputs, scenario_assumptions
 
     return {
         "schema_version": SCHEMA_VERSION,
+        "forecast_id": fid,
         "status": "OK",
         "forecast": forecast,
         "confidence": conf,

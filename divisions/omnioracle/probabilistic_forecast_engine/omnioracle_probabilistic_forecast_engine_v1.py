@@ -140,9 +140,46 @@ def forecast_domain(domain, seed_override=None, min_evidence=1):
         evidence_count=evidence_count,
         min_evidence=min_evidence,
         cross_source_agreement=cross_source_agreement,
+        id_parts=(domain,),
     )
     result["domain"] = domain
+
+    if result["status"] == "OK":
+        _register_ledger_entry(result, domain)
+
     return result
+
+
+def _register_ledger_entry(result, domain):
+    """Give every OK forecast an immutable forecast_ledger entry so
+    forecast_outcome_verifier/calibration.py:record_real_outcome() can later be
+    called against it -- closes the forecast-created -> real-outcome-recorded loop
+    for forecasts made through this engine (not just the 3 hardcoded seed
+    predictions). Each call gets its own distinct forecast_id (timestamp is part of
+    the identity, matching this codebase's existing forecast_ledger/
+    forecast_outcome_verifier convention of one file per event, not an
+    upsert-by-content-key) -- a real outcome attaches to the specific forecast
+    instance it confirms, not to "whatever the latest matching one happens to be"."""
+    LEDGER.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "created_at": result["timestamp"],
+        "ledger_engine": "omnioracle_probabilistic_forecast_engine_v1",
+        "prediction_id": result["forecast_id"],
+        "domain": domain,
+        "prediction": result["forecast"].get("recommended_action") if result.get("forecast") else None,
+        "confidence": result["confidence"],
+        "signals": result["model_or_engine_contributors"],
+        "expected_outcome": result["forecast"],
+        "status": "tracking",
+        "ledger_digest": result["forecast_id"].replace("FCID_", ""),
+        "outcome_verified": False,
+        "accuracy_score": None,
+        "learning_feedback": [],
+    }
+    # calibration.py:_find_ledger_file globs "{prediction_id}_*.json" (matching the
+    # original forecast_ledger seed-entry naming convention), so this filename must
+    # carry a trailing suffix after the prediction_id, not be exactly "{id}.json".
+    (LEDGER / f"{result['forecast_id']}_entry.json").write_text(json.dumps(entry, indent=2))
 
 
 def run_all_domains(min_evidence=1, seed_override=None):

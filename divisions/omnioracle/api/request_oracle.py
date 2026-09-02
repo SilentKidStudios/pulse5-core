@@ -60,6 +60,9 @@ from datetime import datetime, timezone
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deterministic_forecast_core import content_seed
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "real_signal_connector"))
+import live_system_runtime_connector_v1 as _live_runtime_connector
+
 ORACLE = Path(__file__).resolve().parent.parent  # divisions/omnioracle
 RECEIPTS = Path(__file__).resolve().parent / "receipts"
 
@@ -269,6 +272,18 @@ def request_oracle(domain, question=None, *, mode="read", seed=None, min_evidenc
         _write_receipt(request_id, result)
         return result
 
+    # Real (not synthetic) live signal, where available -- the ONE genuinely live
+    # input this facade has (local machine telemetry, no external credentials). In
+    # "generate" mode a fresh reading is collected; in "read" mode the latest
+    # already-collected reading is reported, honestly labeled fresh/stale/absent.
+    try:
+        live_signals = (
+            _live_runtime_connector.collect() if mode == "generate"
+            else _live_runtime_connector.latest_signal()
+        )
+    except Exception as exc:  # bounded failover: connector trouble must not fail the request
+        live_signals = {"status": "CONNECTOR_ERROR", "error": str(exc), "provenance": "live"}
+
     latest = evidence.get("latest_forecast")
     synthetic_projection = None
     if latest:
@@ -296,6 +311,7 @@ def request_oracle(domain, question=None, *, mode="read", seed=None, min_evidenc
         "observations": evidence,
         "evidence_count": evidence_count,
         "synthetic_projection": synthetic_projection,
+        "live_signals": live_signals,
         "engine_runs": engine_runs,
         "reproducible": reproducible,
         "reproducibility": reproducibility_info,
