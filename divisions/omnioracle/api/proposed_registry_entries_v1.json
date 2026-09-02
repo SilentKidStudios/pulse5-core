@@ -1,7 +1,12 @@
 {
   "artifact_type": "PROPOSED_CAPABILITY_REGISTRY_ENTRIES",
-  "note": "This is a REVIEW ARTIFACT, not an auto-merge, mirroring the existing convention in mrsilent_bridge/discovery_data/ and the explicit rule in mrsilent_bridge/capability_registry.py: 'nothing in this project auto-registers a capability without a human having reviewed and added a JSON entry.' Written by the OMNISIM_OMNI_ORACLE_GOD_MODE_V1 campaign (2026-09-02) because mrsilent_bridge/registry_data/capabilities.json has zero entries for either 'omnisim' or 'oracle' as of this writing (verified live via registry_search and capability_status), despite both being real, tested, running components. A human should review these and, if accurate, copy them into mrsilent_bridge/registry_data/capabilities.json's \"entries\" array themselves.",
-  "generated_at": "2026-09-02T00:25:00+00:00",
+  "note": "This is a REVIEW ARTIFACT, not an auto-merge, mirroring the existing convention in mrsilent_bridge/discovery_data/ and the explicit rule in mrsilent_bridge/capability_registry.py: 'nothing in this project auto-registers a capability without a human having reviewed and added a JSON entry.' Originally written 2026-09-02T00:25 by the OMNISIM_OMNI_ORACLE_GOD_MODE_V1 campaign; refreshed 2026-09-02T01:30 (RESUME_OMNISIM_OMNI_ORACLE_FINAL_INTEGRATION campaign) to correct now-stale claims (the underlying engines were unseeded-random when this was first written; they are deterministic as of commit f313b50) and to add an explicit review_determination per this round's instruction to determine what requires Founder/human approval vs. what may be safely integrated under existing policy.",
+  "generated_at": "2026-09-02T01:30:00+00:00",
+  "review_determination": {
+    "question": "What requires Founder/human approval versus what may be safely integrated under existing policy?",
+    "answer": "100% requires human review before merge. mrsilent_bridge/capability_registry.py's own docstring states this as an unconditional rule with no carve-out: 'Read-only at runtime: nothing in this project auto-registers a capability without a human having reviewed and added a JSON entry (or run organ_discovery.py, whose output is a review artifact, not an auto-merge).' There is no 'safe to auto-integrate' tier in the existing policy -- every entry in mrsilent_bridge/registry_data/capabilities.json (35 as of this writing, re-verified live 2026-09-02) was added this way. Live registry_search/capability_status still return zero matches for 'omnisim'/'oracle' as of this writing.",
+    "recommendation": "A human copies the two proposed_entries below into capabilities.json's entries array if satisfied with the evidence_basis cited for each. Neither entry grants execution/production/financial authority (risk_class=decision_support_only_no_execution_authority on both) -- merging the registry entry only makes the capability discoverable via registry_search/capability_status, it does not by itself wire MCP routing (see services/th3_mcp/tools.py status separately) or grant any protected-gate action."
+  },
   "proposed_entries": [
     {
       "capability_id": "omnisim_v1",
@@ -22,36 +27,38 @@
       "cooperates_with": ["omnioracle_v1"],
       "locality": "local",
       "known_callers": ["services/th3_mcp/tools.py (hardcoded direct import, not via this registry, as of 2026-09-02)"],
-      "evidence_basis": "omnisim/reports/omnisim_v1_certification_20260831.json (self-reported, disclaimer-qualified) + independent re-run of its test suite by this campaign (2026-09-02) + live canary via divisions/omnioracle/api/request_oracle.py's also_run_omnisim_scenario ensemble path"
+      "evidence_basis": "omnisim/reports/omnisim_v1_certification_20260831.json (self-reported, disclaimer-qualified) + independent re-run of its test suite across all 4 campaign sessions (2026-09-02) + live canary via divisions/omnioracle/api/request_oracle.py's also_run_omnisim_scenario ensemble path"
     },
     {
       "capability_id": "omnioracle_v1",
       "canonical_name": "Omni Oracle Forecast/Consensus Facade",
       "location": "/opt/pulse5-core/divisions/omnioracle/api/request_oracle.py",
       "division": "omnioracle (this project)",
-      "purpose": "Canonical read/aggregate (and opt-in generate) facade over the 27-module OmniOracle forecast/consensus pipeline (probabilistic_forecast_engine, consensus_intelligence_layer, recursive_simulation_engine, forecast_ledger, forecast_outcome_verifier, etc). Added 2026-09-02 -- this pipeline had no function-callable request/response API before this file.",
-      "task_types": ["forecast_read", "consensus_aggregation", "oracle_health_check"],
+      "purpose": "Canonical read/aggregate (and opt-in generate) facade over the OmniOracle forecast/consensus pipeline (probabilistic_forecast_engine, consensus_intelligence_layer, recursive_simulation_engine, scenario_branch_generator, forecast_ledger, forecast_outcome_verifier, real_signal_connector). This pipeline had no function-callable request/response API before 2026-09-02.",
+      "task_types": ["forecast_read", "forecast_generate", "consensus_aggregation", "oracle_health_check", "calibration_lifecycle"],
       "available_actions": [
         "request_oracle(domain, question=None, *, mode='read'|'generate', seed=None, min_evidence=0, also_run_omnisim_scenario=None)",
-        "oracle_health.health()"
+        "oracle_health.health()",
+        "forecast_outcome_verifier/calibration.py:record_real_outcome(forecast_id, actual_outcome, correct, ...)"
       ],
-      "io_contract": "in: domain (str, must be non-empty), mode, min_evidence; out: status (ok|insufficient_evidence), observations (real counts), synthetic_projection (labeled synthetic, from unseeded-random underlying engines), receipt path",
+      "io_contract": "in: domain (str, must be non-empty), mode, min_evidence; out: status (ok|insufficient_evidence), observations (real counts), synthetic_projection (canonical_forecast_result schema, provenance-labeled), live_signals (real machine telemetry, provenance='live'), forecast_id (immutable, calibration-ready), receipt path",
       "cost_class": "free_local (pure Python + subprocess to local scripts, no external calls, no paid compute)",
       "risk_class": "decision_support_only_no_execution_authority",
       "dependencies": ["omnioracle-continuous-daemon.timer (systemd, live, populates the evidence this facade reads)"],
       "health_status_method": "python3 divisions/omnioracle/api/oracle_health.py",
-      "status": "active_with_known_limitations",
+      "status": "active",
       "availability": "available",
-      "validation_method": "divisions/omnioracle/tests/test_request_oracle.py (19/19 passing incl. adversarial/edge cases, 2026-09-02); live canary run 2026-09-02 (mode=generate + omnisim ensemble)",
+      "validation_method": "divisions/omnioracle/tests/ (96/96 passing as of commit af045ba, incl. determinism, fail-closed, live-signal, and calibration-lifecycle coverage); live canaries run each campaign session",
       "cooperates_with": ["omnisim_v1"],
       "locality": "local",
       "known_limitations": [
-        "confidence/probability_band/risk_factor fields are synthetic placeholders from unseeded random sampling in the underlying engines, not calibrated forecasts -- see module docstring",
-        "real_signal_connector has zero live external data connectors (all blueprint_ready, live_collection_enabled=false)",
-        "forecast_outcome_verifier will not score reliability until real outcomes are confirmed (real_outcome_required=true)",
-        "not wired into services/th3_mcp/tools.py as of 2026-09-02 (that file is owned by a separate concurrently-active session; see EXTERNAL_ACTIVE_SESSION_DEPENDENCY in this campaign's final report)"
+        "confidence/risk are deterministic (seeded Monte Carlo + real evidence counts) as of commit f313b50, but still labeled provenance=\"synthetic\" for 4 of 5 real_signal_connector sources -- only SIG_SYSTEM_RUNTIME (local machine telemetry) is live as of commit af045ba, and only fused into the runtime_autonomy domain specifically",
+        "SIG_APPROVAL_PATTERNS and SIG_STUDIO_ACTIVITY remain unwired pending an unambiguous release of the concurrent mr_silent_spine campaign (deferred again this round -- see this campaign's final report)",
+        "SIG_SOCIAL_TRENDS and SIG_MARKET_INTEL need real paid external API credentials -- not activated, PAID_AUTHORIZATION_REQUIRED",
+        "forecast_outcome_verifier/calibration.py's real-outcome mechanism is proven (test fixtures only) but has recorded zero genuine real-world outcomes as of this writing",
+        "not wired into services/th3_mcp/tools.py as of this writing -- deferred pending unambiguous confirmation the concurrent session has released it (see this campaign's final report)"
       ],
-      "evidence_basis": "divisions/omnioracle/final_godmode_audit/reports/omnioracle_final_godmode_gap_audit_v1.json (2026-05-07, honest_status=TRUE_GOD_MODE_FOUNDATION_LOCKED_NEEDS_LONG_TERM_REALITY_CALIBRATION) + this campaign's independent code review, test suite, and live canary (2026-09-02)"
+      "evidence_basis": "divisions/omnioracle/final_godmode_audit/reports/omnioracle_final_godmode_gap_audit_v1.json (2026-05-07, honest_status=TRUE_GOD_MODE_FOUNDATION_LOCKED_NEEDS_LONG_TERM_REALITY_CALIBRATION) + 4 independent campaign sessions' code review, 96-test regression suite, and live canaries (2026-09-01 through 2026-09-02, commits f313b50/27f0b8f/af045ba)"
     }
   ]
 }
