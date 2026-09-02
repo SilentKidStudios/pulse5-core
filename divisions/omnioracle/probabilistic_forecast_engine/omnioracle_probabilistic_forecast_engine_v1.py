@@ -28,12 +28,23 @@ from deterministic_forecast_core import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "real_signal_connector"))
 import live_system_runtime_connector_v1 as _live_runtime_connector
+import live_studio_activity_connector_v1 as _live_studio_connector
+import live_approval_patterns_connector_v1 as _live_approval_connector
 
-# Only domains where local machine telemetry (load/disk/memory/service health) is
-# semantically relevant evidence get fused with the live signal -- using it for
-# e.g. "swarm_coordination" or "strategic_expansion" would be evidence-laundering
-# (real but irrelevant data inflating an unrelated forecast's evidence_count).
-LIVE_SIGNAL_RELEVANT_DOMAINS = {"runtime_autonomy"}
+# Each domain is fused with AT MOST ONE live connector -- whichever one is
+# semantically relevant to it. Using e.g. local machine telemetry for
+# "strategic_expansion" or approval patterns for "runtime_autonomy" would be
+# evidence-laundering (real but irrelevant data inflating an unrelated forecast's
+# evidence_count). A domain with no entry here gets no live fusion at all.
+#   runtime_autonomy      <- SIG_SYSTEM_RUNTIME (load/disk/memory/service health)
+#   swarm_coordination    <- SIG_STUDIO_ACTIVITY (queue_growth/division_health/worker_output)
+#   strategic_expansion   <- SIG_APPROVAL_PATTERNS (real founder approval/denial distribution)
+LIVE_SIGNAL_CONNECTOR_BY_DOMAIN = {
+    "runtime_autonomy": _live_runtime_connector,
+    "swarm_coordination": _live_studio_connector,
+    "strategic_expansion": _live_approval_connector,
+}
+LIVE_SIGNAL_RELEVANT_DOMAINS = set(LIVE_SIGNAL_CONNECTOR_BY_DOMAIN)
 
 # Deterministic, bounded adjustment to base_score from the live signal's risk_level.
 # Never large enough to flip a forecast on its own -- it nudges a synthetic base
@@ -128,15 +139,17 @@ def forecast_domain(domain, seed_override=None, min_evidence=1):
         base_score = heuristic_base_score(domain)
         contributors = ["heuristic_base_score(domain) -- no consensus/ledger evidence found"]
 
-    # Live signal fusion (Priority 3, INDEPENDENT_GAP_CLOSURE campaign): only for
-    # domains where local machine telemetry is genuinely relevant evidence, and only
-    # when the reading is fresh -- a stale or unavailable live signal is honestly
-    # excluded and reported, never silently reused or treated as current.
-    live_signal_info = {"applicable": domain in LIVE_SIGNAL_RELEVANT_DOMAINS}
-    if live_signal_info["applicable"]:
-        live_reading = _live_runtime_connector.latest_signal()
-        fresh = _live_runtime_connector.is_fresh(live_reading)
+    # Live signal fusion: only for the one domain (at most) each connector is
+    # genuinely relevant to, and only when the reading is fresh -- a stale or
+    # unavailable live signal is honestly excluded and reported, never silently
+    # reused or treated as current.
+    connector = LIVE_SIGNAL_CONNECTOR_BY_DOMAIN.get(domain)
+    live_signal_info = {"applicable": connector is not None}
+    if connector is not None:
+        live_reading = connector.latest_signal()
+        fresh = connector.is_fresh(live_reading)
         live_signal_info.update({
+            "connector": connector.__name__,
             "status": live_reading.get("status"),
             "fresh": fresh,
             "signal_id": live_reading.get("signal_id"),
@@ -147,7 +160,7 @@ def forecast_domain(domain, seed_override=None, min_evidence=1):
             base_score = max(0.0, min(1.0, round(base_score + adjustment, 4)))
             evidence_count += 1
             contributors.append(
-                f"live_system_runtime_connector (real machine telemetry, signal_id={live_reading.get('signal_id')}, "
+                f"{connector.__name__} (real evidence, signal_id={live_reading.get('signal_id')}, "
                 f"risk_level={live_reading.get('risk_level')})"
             )
         else:

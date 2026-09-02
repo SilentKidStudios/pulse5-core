@@ -38,6 +38,8 @@ from pathlib import Path
 ROOT = Path("/opt/pulse5-core")
 sys.path.insert(0, str(ROOT / "omnisim" / "api"))
 import request_scenario as _omnisim_scenario  # noqa: E402
+sys.path.insert(0, str(ROOT / "divisions" / "omnioracle" / "api"))
+import request_oracle as _omnioracle_forecast  # noqa: E402
 sys.path.insert(0, str(ROOT / "mrsilent_bridge"))
 import job_ledger  # noqa: E402
 import studio_router  # noqa: E402
@@ -147,6 +149,26 @@ def request_simulation(question: str, assumptions: list | None = None, options: 
     (assumptions, scored options, uncertainty note, recommendation boundaries,
     receipt path). Read/write bounded to omnisim/'s own directories."""
     return _omnisim_scenario.request_scenario(question, assumptions, options)
+
+
+def request_oracle(domain: str, question: str | None = None, mode: str = "read", seed=None,
+                    min_evidence: int = 0, also_run_omnisim_scenario: str | None = None) -> dict:
+    """Submit a structured forecast/consensus request to Omni Oracle and get back a
+    labeled result: real evidence-artifact counts, a synthetic_projection (deterministic,
+    evidence-derived, explicitly labeled provenance='synthetic' -- never presented as a
+    calibrated real-world prediction), live_signals (real local-machine telemetry where
+    applicable, provenance='live'), an immutable forecast_id a later real outcome can be
+    recorded against, and a durable receipt. mode='read' (default) only aggregates
+    evidence already on disk; mode='generate' also triggers a fresh deterministic pipeline
+    cycle (scenario_branch_generator -> recursive_simulation_engine ->
+    consensus_intelligence_layer -> probabilistic_forecast_engine), reproducible given the
+    same seed. also_run_omnisim_scenario, if given, also calls OmniSim's own
+    request_scenario() and includes it as a separate, clearly-bounded ensemble result.
+    Read/write bounded to divisions/omnioracle/'s own directories."""
+    return _omnioracle_forecast.request_oracle(
+        domain, question, mode=mode, seed=seed, min_evidence=min_evidence,
+        also_run_omnisim_scenario=also_run_omnisim_scenario,
+    )
 
 
 def council_post_result(source_label: str, in_reply_to: str, summary: str, payload: dict) -> dict:

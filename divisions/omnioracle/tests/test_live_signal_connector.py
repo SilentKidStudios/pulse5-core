@@ -156,5 +156,19 @@ def test_live_signal_not_applicable_for_unrelated_domain(tmp_path, monkeypatch):
     isolated_ledger.mkdir()
     monkeypatch.setattr(pfe, "LEDGER", isolated_ledger)
 
-    result = pfe.forecast_domain("swarm_coordination", seed_override=1, min_evidence=0)
+    # prediction_accuracy has no connector mapped -- runtime_autonomy/
+    # swarm_coordination/strategic_expansion do (see LIVE_SIGNAL_CONNECTOR_BY_DOMAIN)
+    result = pfe.forecast_domain("prediction_accuracy", seed_override=1, min_evidence=0)
     assert result["evidence_inputs"]["live_signal"]["applicable"] is False
+
+
+def test_all_three_live_connectors_map_to_distinct_domains():
+    import importlib.util
+    pfe_path = Path(__file__).resolve().parent.parent / "probabilistic_forecast_engine" / "omnioracle_probabilistic_forecast_engine_v1.py"
+    spec = importlib.util.spec_from_file_location("pfe_livefusion_test3", pfe_path)
+    pfe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pfe)
+
+    mapping = pfe.LIVE_SIGNAL_CONNECTOR_BY_DOMAIN
+    assert set(mapping.keys()) == {"runtime_autonomy", "swarm_coordination", "strategic_expansion"}
+    assert len(set(id(v) for v in mapping.values())) == 3  # each domain has its own distinct connector

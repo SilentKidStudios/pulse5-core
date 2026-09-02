@@ -61,6 +61,27 @@ TOOL_SPECS = [
         "fn": lambda args: T.request_simulation(args.get("question", ""), args.get("assumptions"), args.get("options")),
     },
     {
+        "name": "request_oracle",
+        "description": "Submit a forecast/consensus question to Omni Oracle (governed forecasting organ). Returns real evidence-artifact counts, a synthetic_projection (deterministic, evidence-derived, explicitly labeled provenance='synthetic' -- never a calibrated real-world prediction), live_signals (real local-machine telemetry where applicable, provenance='live'), an immutable forecast_id a later real outcome can be recorded against, and a durable receipt. mode='read' (default, cheap) only aggregates evidence already on disk; mode='generate' also runs a fresh deterministic forecast cycle, reproducible given the same seed. Optionally also runs OmniSim's request_scenario as a separate, clearly-bounded ensemble result.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "domain": {"type": "string", "description": "e.g. runtime_autonomy, swarm_coordination, prediction_accuracy, cross_division_growth, strategic_expansion"},
+                "question": {"type": "string"},
+                "mode": {"type": "string", "enum": ["read", "generate"], "default": "read"},
+                "seed": {"description": "optional int or string; makes mode='generate' exactly reproducible"},
+                "min_evidence": {"type": "integer", "default": 0, "description": "fail closed to insufficient_evidence below this many real evidence artifacts, instead of fabricating a result"},
+                "also_run_omnisim_scenario": {"type": "string", "description": "optional question string; if given, also calls OmniSim's request_scenario as an ensemble result"},
+            },
+            "required": ["domain"],
+            "additionalProperties": False,
+        },
+        "fn": lambda args: T.request_oracle(
+            args.get("domain", ""), args.get("question"), args.get("mode", "read"),
+            args.get("seed"), int(args.get("min_evidence", 0)), args.get("also_run_omnisim_scenario"),
+        ),
+    },
+    {
         "name": "council_post_result",
         "description": "Post a bounded result back into the Studio's existing governed division-signal-bus inbox (source_division defaults to CT_MCP_BRIDGE). This is the ONLY write-capable tool; it can only append one schema-matching signal file, nothing else.",
         "inputSchema": {

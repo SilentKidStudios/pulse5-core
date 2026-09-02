@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-"""Real signal connector blueprints. UPDATED 2026-09-02 (OMNI_ORACLE_GOD_MODE_V1_
-SYNTHETICITY_+_LIVE-SIGNAL_CLOSURE campaign): SIG_SYSTEM_RUNTIME is now genuinely
-live -- see live_system_runtime_connector_v1.py in this same directory, which reads
-real local machine telemetry (load average, memory, disk, this division's own
-systemd unit health) with no new credentials. The other 4 connectors remain
-blueprint_ready/live_collection_enabled=False: SIG_SOCIAL_TRENDS and SIG_MARKET_INTEL
-need real paid external API credentials (blocked outright without Founder
-authorization); SIG_APPROVAL_PATTERNS and SIG_STUDIO_ACTIVITY would need reading
-mr_silent_spine internal state, out of this campaign's concurrency-safe scope."""
+"""Real signal connector blueprints. 3 of 5 connectors are now genuinely live:
+
+  - SIG_SYSTEM_RUNTIME (2026-09-02, OMNI_ORACLE_GOD_MODE_V1_SYNTHETICITY_+_
+    LIVE-SIGNAL_CLOSURE campaign): live_system_runtime_connector_v1.py reads real
+    local machine telemetry (load average, memory, disk, this division's own
+    systemd unit health), no new credentials.
+  - SIG_APPROVAL_PATTERNS and SIG_STUDIO_ACTIVITY (2026-09-02,
+    RESUME_OMNISIM_OMNI_ORACLE_FINAL_INTEGRATION campaign, after independently
+    re-verifying the concurrent mr_silent_spine campaign's shared-scope collision
+    was no longer current): live_approval_patterns_connector_v1.py reads
+    mrsilent_bridge/job_ledger.py's real approval_state distribution;
+    live_studio_activity_connector_v1.py reads
+    mr_silent_spine/division_signal_bus/{inbox,receipts}/. Both are read-only
+    against those trees -- neither writes anything there.
+
+SIG_SOCIAL_TRENDS and SIG_MARKET_INTEL remain blueprint_ready/
+live_collection_enabled=False: both need real paid external API credentials,
+blocked outright without Founder authorization (PAID_AUTHORIZATION_REQUIRED)."""
 
 import json, hashlib
 from pathlib import Path
@@ -52,8 +61,10 @@ connector_blueprints=[
         "connector_id":"SIG_APPROVAL_PATTERNS",
         "source_type":"founder_behavior",
         "examples":["approvals","denials","priority_patterns"],
-        "status":"blueprint_ready",
-        "live_collection_enabled":False
+        "status":"live",
+        "live_collection_enabled":True,
+        "implementation":"divisions/omnioracle/real_signal_connector/live_approval_patterns_connector_v1.py",
+        "note":"Flipped live 2026-09-02 (RESUME_OMNISIM_OMNI_ORACLE_FINAL_INTEGRATION): reads mrsilent_bridge/job_ledger.py's real approval_state distribution (6400+ real job records), read-only."
     },
     {
         "connector_id":"SIG_MARKET_INTEL",
@@ -66,8 +77,10 @@ connector_blueprints=[
         "connector_id":"SIG_STUDIO_ACTIVITY",
         "source_type":"studio_internal_activity",
         "examples":["queue_growth","division_health","worker_output"],
-        "status":"blueprint_ready",
-        "live_collection_enabled":False
+        "status":"live",
+        "live_collection_enabled":True,
+        "implementation":"divisions/omnioracle/real_signal_connector/live_studio_activity_connector_v1.py",
+        "note":"Flipped live 2026-09-02 (RESUME_OMNISIM_OMNI_ORACLE_FINAL_INTEGRATION): reads mr_silent_spine/division_signal_bus/{inbox,receipts}/, read-only."
     }
 ]
 

@@ -35,6 +35,7 @@ omnioracle_real_signal_connector_v1.py normalization_schema's required_fields
 import json
 import subprocess
 import hashlib
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -153,7 +154,7 @@ def collect(force: bool = False) -> dict:
                 }
 
         signal = {
-            "signal_id": f"SIG_SYSTEM_RUNTIME_{int(datetime.now(timezone.utc).timestamp()*1_000_000)}",
+            "signal_id": f"SIG_SYSTEM_RUNTIME_{int(datetime.now(timezone.utc).timestamp()*1_000_000)}_{uuid.uuid4().hex[:8]}",
             "source_type": "system_runtime",
             "timestamp": _now(),
             "confidence": 1.0,
@@ -167,7 +168,7 @@ def collect(force: bool = False) -> dict:
         }
     except Exception as exc:
         signal = {
-            "signal_id": f"SIG_SYSTEM_RUNTIME_ERROR_{int(datetime.now(timezone.utc).timestamp()*1_000_000)}",
+            "signal_id": f"SIG_SYSTEM_RUNTIME_ERROR_{int(datetime.now(timezone.utc).timestamp()*1_000_000)}_{uuid.uuid4().hex[:8]}",
             "source_type": "system_runtime",
             "timestamp": _now(),
             "confidence": None,
