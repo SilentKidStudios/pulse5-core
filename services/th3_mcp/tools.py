@@ -46,7 +46,8 @@ import studio_router  # noqa: E402
 import capability_registry  # noqa: E402
 import authority_policy  # noqa: E402
 import secret_path_policy  # noqa: E402
-from evolution import proposal as proposal_mod  # noqa: E402
+from evolution import proposal as proposal_mod
+from evolution import advance as advance_mod  # noqa: E402
 STATE = ROOT / "mr_silent_spine" / "state"
 BUS_INBOX = ROOT / "mr_silent_spine" / "division_signal_bus" / "inbox"
 BUS_RECEIPTS = ROOT / "mr_silent_spine" / "division_signal_bus" / "receipts"
@@ -916,3 +917,74 @@ def cancel_work(work_id: str) -> dict:
 
     updated = proposal_mod.advance(work_id, proposal_mod.ProposalStatus.REJECTED, note="cancelled via CT/ChatGPT cancel_work (no implementation attempt had started)")
     return {"found": True, "work_id": work_id, "cancelled": True, "status": updated.status, "already_cancelled": False, "generated_at_utc": _now()}
+
+
+def recover_work(work_id: str, reason: str = "") -> dict:
+    """Governed stale-work recovery/reconciliation for one submit_work item.
+
+    THIN wrapper only -- every actual governance decision (heartbeat/lease
+    staleness detection, deterministic reconcile-vs-terminalize, the atomic
+    proposal-scoped job_ledger.claim/release lock, bounded idempotent resume,
+    fail-closed-on-ambiguity, and the durable audit.record() receipt) is the
+    EXISTING, already-tested evolution.advance.advance_one() pipeline (see
+    job_ledger.is_stale/classify and bridge.resume_job/
+    omniengineer_harness.resume_job, which advance_one() dispatches to via
+    the job's own selected_engine). This function adds no new reconciliation
+    logic -- only a governed, externally-invokable entry point onto the
+    existing one (BLEND_NOT_REPLACE), plus a self-contained structured
+    receipt for the caller.
+
+    Fails closed exactly where advance_one() already does, with no mutation:
+    a proposal whose risk_score != 'low', or whose status is not one of
+    {observed, proposed} (already past this pipeline, or a live/fresh
+    non-stale job legitimately still owned by someone), is reported blocked
+    -- never bypassed. There is no founder_approved override here, same as
+    submit_work."""
+    try:
+        p_before = proposal_mod.load(work_id)
+    except Exception:
+        return {"found": False, "work_id": work_id, "generated_at_utc": _now()}
+
+    prior_status = p_before.status
+    prior_job_ids = list(p_before.implementation_job_ids)
+    prior_job_id = prior_job_ids[-1] if prior_job_ids else None
+    prior_job_evidence = None
+    if prior_job_id:
+        record = job_ledger.load(prior_job_id)
+        if record is not None:
+            prior_job_evidence = {
+                "job_id": prior_job_id,
+                "state": record.state,
+                "selected_engine": record.selected_engine,
+                "heartbeat": record.heartbeat,
+                "is_stale": job_ledger.is_stale(record),
+                "resume_count": record.resume_count,
+                "lock_status": job_ledger.lock_status(prior_job_id),
+            }
+
+    result = advance_mod.advance_one(work_id, requested_by="th3_mcp.recover_work")
+
+    p_after = proposal_mod.load(work_id)
+    mutated = (p_after.status != prior_status) or (p_after.implementation_job_ids != prior_job_ids)
+
+    return {
+        "found": True,
+        "work_id": work_id,
+        "operation": "recover_work",
+        "requested_reason": (reason or "")[:1000],
+        "prior_status": prior_status,
+        "prior_implementation_job": prior_job_evidence,
+        "decision": {
+            "final_status": result.final_status,
+            "blocked_reason": result.blocked_reason,
+            "selected_engine": result.selected_engine,
+            "attempt_number": result.attempt_number,
+            "implementation_job_id": result.implementation_job_id,
+            "stages": result.stages,
+        },
+        "resulting_status": p_after.status,
+        "resulting_implementation_job_ids": p_after.implementation_job_ids,
+        "mutated": mutated,
+        "source": "evolution.advance.advance_one (existing governed reconciliation pipeline) + mrsilent_bridge.job_ledger",
+        "generated_at_utc": _now(),
+    }

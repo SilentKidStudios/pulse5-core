@@ -220,6 +220,20 @@ TOOL_SPECS = [
         },
         "fn": lambda args: T.cancel_work(args.get("work_id", "")),
     },
+    {
+        "name": "recover_work",
+        "description": "Governed stale-work recovery/reconciliation for one submit_work item. THIN wrapper around the EXISTING, already-tested evolution.advance.advance_one() pipeline -- adds no new staleness/reconciliation logic, only a governed entry point onto it plus a structured receipt (prior state, staleness evidence, decision, resulting state, mutated flag). Re-derives authority from scratch and re-reads the job ledger immediately before deciding; never bypasses authority. Fails closed with NO mutation whenever the proposal's risk_score != 'low', its status is already past {observed, proposed}, or its latest implementation job is live/fresh and not provably stale -- reported as blocked, not silently skipped or forced. Idempotent: a proposal whose implementation job already reached a real terminal state, or that has already been auto-resumed the maximum number of times, is reported unchanged, never re-mutated or duplicated.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "work_id": {"type": "string", "maxLength": 200},
+                "reason": {"type": "string", "maxLength": 1000, "default": ""},
+            },
+            "required": ["work_id"],
+            "additionalProperties": False,
+        },
+        "fn": lambda args: T.recover_work(args.get("work_id", ""), args.get("reason", "")),
+    },
 ]
 
 TOOLS_BY_NAME = {t["name"]: t for t in TOOL_SPECS}
