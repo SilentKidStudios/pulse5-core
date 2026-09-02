@@ -1,0 +1,57 @@
+{
+  "artifact_type": "PROPOSED_CAPABILITY_REGISTRY_ENTRIES",
+  "note": "This is a REVIEW ARTIFACT, not an auto-merge, mirroring the existing convention in mrsilent_bridge/discovery_data/ and the explicit rule in mrsilent_bridge/capability_registry.py: 'nothing in this project auto-registers a capability without a human having reviewed and added a JSON entry.' Written by the OMNISIM_OMNI_ORACLE_GOD_MODE_V1 campaign (2026-09-02) because mrsilent_bridge/registry_data/capabilities.json has zero entries for either 'omnisim' or 'oracle' as of this writing (verified live via registry_search and capability_status), despite both being real, tested, running components. A human should review these and, if accurate, copy them into mrsilent_bridge/registry_data/capabilities.json's \"entries\" array themselves.",
+  "generated_at": "2026-09-02T00:25:00+00:00",
+  "proposed_entries": [
+    {
+      "capability_id": "omnisim_v1",
+      "canonical_name": "OmniSim Scenario/Decision-Support Engine",
+      "location": "/opt/pulse5-core/omnisim/api/request_scenario.py",
+      "division": "omnisim (this project)",
+      "purpose": "Governed what-if / decision-support scenario analysis via 3 transparent heuristic/arithmetic engines (decision_heuristic, resource_model, comparative_scenario). Not a predictive model.",
+      "task_types": ["scenario_analysis", "decision_support", "resource_projection"],
+      "available_actions": ["request_scenario(question, assumptions=None, options=None, *, scenario_type=..., variables=..., constraints=..., requested_outputs=...)"],
+      "io_contract": "in: question (str) + scenario_type + variables/constraints (dict); out: structured result with scenario_outputs, uncertainty, risks, limitations, receipt path",
+      "cost_class": "free_local (pure Python, no external calls, no paid compute)",
+      "risk_class": "decision_support_only_no_execution_authority",
+      "dependencies": ["omnisim/weights/signal_weights_active.json (decision_heuristic engine only)"],
+      "health_status_method": "python3 -m pytest omnisim/tests/test_request_scenario.py",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "omnisim/tests/test_request_scenario.py (4/4 passing, independently re-run 2026-09-02); live systemd timer omnisim-loop.timer",
+      "cooperates_with": ["omnioracle_v1"],
+      "locality": "local",
+      "known_callers": ["services/th3_mcp/tools.py (hardcoded direct import, not via this registry, as of 2026-09-02)"],
+      "evidence_basis": "omnisim/reports/omnisim_v1_certification_20260831.json (self-reported, disclaimer-qualified) + independent re-run of its test suite by this campaign (2026-09-02) + live canary via divisions/omnioracle/api/request_oracle.py's also_run_omnisim_scenario ensemble path"
+    },
+    {
+      "capability_id": "omnioracle_v1",
+      "canonical_name": "Omni Oracle Forecast/Consensus Facade",
+      "location": "/opt/pulse5-core/divisions/omnioracle/api/request_oracle.py",
+      "division": "omnioracle (this project)",
+      "purpose": "Canonical read/aggregate (and opt-in generate) facade over the 27-module OmniOracle forecast/consensus pipeline (probabilistic_forecast_engine, consensus_intelligence_layer, recursive_simulation_engine, forecast_ledger, forecast_outcome_verifier, etc). Added 2026-09-02 -- this pipeline had no function-callable request/response API before this file.",
+      "task_types": ["forecast_read", "consensus_aggregation", "oracle_health_check"],
+      "available_actions": [
+        "request_oracle(domain, question=None, *, mode='read'|'generate', seed=None, min_evidence=0, also_run_omnisim_scenario=None)",
+        "oracle_health.health()"
+      ],
+      "io_contract": "in: domain (str, must be non-empty), mode, min_evidence; out: status (ok|insufficient_evidence), observations (real counts), synthetic_projection (labeled synthetic, from unseeded-random underlying engines), receipt path",
+      "cost_class": "free_local (pure Python + subprocess to local scripts, no external calls, no paid compute)",
+      "risk_class": "decision_support_only_no_execution_authority",
+      "dependencies": ["omnioracle-continuous-daemon.timer (systemd, live, populates the evidence this facade reads)"],
+      "health_status_method": "python3 divisions/omnioracle/api/oracle_health.py",
+      "status": "active_with_known_limitations",
+      "availability": "available",
+      "validation_method": "divisions/omnioracle/tests/test_request_oracle.py (19/19 passing incl. adversarial/edge cases, 2026-09-02); live canary run 2026-09-02 (mode=generate + omnisim ensemble)",
+      "cooperates_with": ["omnisim_v1"],
+      "locality": "local",
+      "known_limitations": [
+        "confidence/probability_band/risk_factor fields are synthetic placeholders from unseeded random sampling in the underlying engines, not calibrated forecasts -- see module docstring",
+        "real_signal_connector has zero live external data connectors (all blueprint_ready, live_collection_enabled=false)",
+        "forecast_outcome_verifier will not score reliability until real outcomes are confirmed (real_outcome_required=true)",
+        "not wired into services/th3_mcp/tools.py as of 2026-09-02 (that file is owned by a separate concurrently-active session; see EXTERNAL_ACTIVE_SESSION_DEPENDENCY in this campaign's final report)"
+      ],
+      "evidence_basis": "divisions/omnioracle/final_godmode_audit/reports/omnioracle_final_godmode_gap_audit_v1.json (2026-05-07, honest_status=TRUE_GOD_MODE_FOUNDATION_LOCKED_NEEDS_LONG_TERM_REALITY_CALIBRATION) + this campaign's independent code review, test suite, and live canary (2026-09-02)"
+    }
+  ]
+}
