@@ -18,6 +18,8 @@ Run: python3 -m pytest services/th3_mcp/tests/test_recover_work.py -v
 """
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -222,3 +224,153 @@ def test_concurrent_claim_blocks_recovery_without_mutating(cleanup_proposals, mo
     finally:
         # release requires the same pid that claimed it -- this test process claimed it, so it can release it.
         job_ledger.release(lock_key, owner="other_process")
+
+
+# ---- OWLS DEFECT_RECEIPT=e61d2e2b16df4b77 ----------------------------------
+#
+# Root cause: resume_job() (bridge.py and omniengineer_harness.py) and
+# advance_one()'s proposal-scoped claim (evolution/advance.py) both called
+# job_ledger.claim() on the job's/proposal's OWN lock file and, on failure,
+# refused unconditionally -- even when that lock was left behind by an
+# owner process that crashed WHILE HOLDING IT (never reached its own
+# `finally: release()`). job_ledger.is_stale()/classify() correctly called
+# the underlying WORK recovery-eligible, but the orphaned LOCK FILE itself
+# silently blocked every future claim() forever: resume_job() refused,
+# advance_one() fell through to a fresh attempt, and that fresh attempt was
+# then correctly deduped against the very same still-non-terminal stale
+# record -- a permanent mutated=false stalemate. break_stale_lock() already
+# existed in this codebase for exactly this scenario (used by
+# autonomous_cycle.py/cli.py for other lock keys) but nothing in the
+# resume/advance path ever called it. Fixed via job_ledger.
+# claim_or_break_stale(), used by both resume_job() implementations and by
+# advance_one()'s proposal-scoped claim.
+
+_DEAD_PID = 2 ** 31 - 1  # far beyond any real pid on this system
+
+
+def _plant_dead_lock(job_id_or_key: str, *, seconds_ago: int = 2000) -> None:
+    """Simulates the exact OWLS precondition: a lock file for an owner
+    process that is provably not alive -- not merely a stale heartbeat on
+    the ledger record itself, but the LOCK FILE surviving its dead owner."""
+    job_ledger._lock_path(job_id_or_key).parent.mkdir(parents=True, exist_ok=True)
+    job_ledger._lock_path(job_id_or_key).write_text(json.dumps({
+        "owner": "crashed_process", "pid": _DEAD_PID, "hostname": "test",
+        "claimed_at": (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat(),
+    }))
+
+
+def test_claim_or_break_stale_never_touches_a_lock_held_by_a_live_pid():
+    job_id = f"test-lock-live-{uuid.uuid4()}"
+    workdir = job_ledger.JOBS_ROOT / job_id / "workdir"
+    workdir.mkdir(parents=True, exist_ok=True)
+    job_ledger.create(job_id, task="TEST-ONLY: live lock must never be broken", requested_by="test", sandbox_path=str(workdir))
+    assert job_ledger.claim(job_id, owner="live_owner") is True  # this test process's own real, live pid
+    try:
+        claimed, broke = job_ledger.claim_or_break_stale(job_id, owner="recover_attempt")
+        assert claimed is False
+        assert broke is False
+        status = job_ledger.lock_status(job_id)
+        assert status["held"] is True
+        assert status["owner"] == "live_owner"  # untouched -- never raced or broken
+    finally:
+        job_ledger.release(job_id, owner="live_owner")
+        job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result="test_fixture_cleanup", error_class="synthetic_test")
+
+
+def test_claim_or_break_stale_breaks_a_dead_pid_lock_and_claims():
+    job_id = f"test-lock-dead-{uuid.uuid4()}"
+    workdir = job_ledger.JOBS_ROOT / job_id / "workdir"
+    workdir.mkdir(parents=True, exist_ok=True)
+    job_ledger.create(job_id, task="TEST-ONLY: dead lock must be broken and reclaimed", requested_by="test", sandbox_path=str(workdir))
+    _plant_dead_lock(job_id)
+    try:
+        claimed, broke = job_ledger.claim_or_break_stale(job_id, owner="recover_attempt")
+        assert claimed is True
+        assert broke is True
+        status = job_ledger.lock_status(job_id)
+        assert status["owner"] == "recover_attempt"
+    finally:
+        job_ledger.release(job_id, owner="recover_attempt")
+        job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result="test_fixture_cleanup", error_class="synthetic_test")
+
+
+def test_owls_defect_dead_job_lock_no_longer_leaves_recovery_stuck(cleanup_proposals, cleanup_jobs, monkeypatch):
+    """Full end-to-end reproduction of DEFECT_RECEIPT=e61d2e2b16df4b77 through
+    the real (unmocked) resume_job()/advance_one() lock logic -- only the
+    outbound `claude -p` subprocess is mocked (same pattern
+    test_bridge_ledger.py already uses), so this proves the actual fix, not
+    a stand-in."""
+    work_id = _make_proposal(cleanup_proposals, risk_score="low", status=proposal_mod.ProposalStatus.PROPOSED)
+    job_id = _make_job(cleanup_jobs, state=JobState.EDITING, selected_engine="claude_code", stale_seconds_ago=2000)
+    proposal_mod.append_implementation_job(work_id, job_id, engine="claude_code")
+
+    _plant_dead_lock(job_id)  # the owner that was editing this job crashed mid-run, lock never released
+    pre_status = job_ledger.lock_status(job_id)
+    assert pre_status["held"] is True and pre_status["stale"] is True, "sanity: precondition must reproduce a stale, held lock"
+
+    def fake_run(cmd, **kwargs):
+        workdir = Path(kwargs["cwd"])
+        (workdir / "recovered.txt").write_text("recovered")
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"result": "ok"}', stderr="")
+
+    monkeypatch.setattr(advance_mod.bridge.subprocess, "run", fake_run)
+
+    task_fingerprint = job_ledger.load(job_id).task_fingerprint
+    # BEFORE the fix this would have stayed permanently non-terminal and
+    # permanently visible to dedup -- assert the real starting condition.
+    assert job_ledger.find_active_by_fingerprint(task_fingerprint) is not None
+
+    result = T.recover_work(work_id, reason="TEST-ONLY: reproduce and verify the OWLS dead-lock defect fix")
+
+    reconciled = job_ledger.load(job_id)
+    assert reconciled.resume_count == 1, "a real resume attempt must have run, not a refusal"
+    assert reconciled.state in {s.value for s in job_ledger.TERMINAL_STATES}, \
+        "the stale job must be durably reconciled to a real terminal state, never left frozen"
+    assert job_ledger.lock_status(job_id)["held"] is False, "the job-level lock must be released after reconciliation"
+
+    # STALE_NO_LONGER_BLOCKS_FRESH_DEDUP
+    assert job_ledger.find_active_by_fingerprint(task_fingerprint) is None
+
+    # RECOVERY_ELIGIBLE_STALE_MUTATES / DURABLE_RECONCILIATION
+    assert result["mutated"] is True
+    assert result["resulting_status"] != result["prior_status"]
+
+    # IDEMPOTENT_RECOVERY: calling again must not re-break anything or
+    # re-mutate -- the proposal has already moved past {observed, proposed}.
+    result2 = T.recover_work(work_id)
+    assert result2["mutated"] is False
+    assert job_ledger.load(job_id).resume_count == 1, "idempotent retry must not re-trigger another resume attempt"
+
+
+def test_owls_defect_dead_proposal_lock_no_longer_leaves_recovery_stuck(cleanup_proposals, monkeypatch):
+    """Same defect class, one layer up: the proposal-scoped implementation
+    claim (evolution.advance._proposal_lock_key) can be orphaned by a dead
+    advancer exactly like a job-level lock. Proves advance_one()'s claim is
+    also self-healing now, using a proposal with no implementation job at
+    all yet (isolates this from the job-level fix, which is covered by
+    test_owls_defect_dead_job_lock_no_longer_leaves_recovery_stuck above).
+
+    The implementation router is neutered to a harmless, real, no-engine-
+    available outcome (the same outcome advance_one() already produces when
+    e.g. every engine is quota-limited) so this test never dispatches a real
+    engine/subprocess -- it isolates the concurrency_claim stage only."""
+    def _no_engine_available(task_text, requested_by, proposal_id, *, allow_paid=True):
+        return advance_mod.ImplementationOutcome(
+            selected_engine=None, engine_selection_reason="TEST-ONLY: neutered, no real engine dispatched",
+            engines_considered=[], quota_state={}, authority_state={}, fallback_reason=None,
+            local_attempt_result=None, job=None, terminal_reject=False, terminal_reject_detail=None,
+        )
+    monkeypatch.setattr(advance_mod, "_implementation_router", _no_engine_available)
+
+    work_id = _make_proposal(cleanup_proposals, risk_score="low", status=proposal_mod.ProposalStatus.PROPOSED)
+    lock_key = advance_mod._proposal_lock_key(work_id)
+    _plant_dead_lock(lock_key)
+    pre_status = job_ledger.lock_status(lock_key)
+    assert pre_status["held"] is True and pre_status["stale"] is True
+
+    result = advance_mod.advance_one(work_id, requested_by="th3_mcp.recover_work")
+
+    assert not any(s["stage"] == "concurrency_claim" and s["outcome"] == "blocked" for s in result.stages), \
+        "a dead advancer's orphaned proposal-level lock must be broken, not refused forever"
+    assert any(s["stage"] == "concurrency_claim" and s["outcome"] == "ok" for s in result.stages)
+    assert job_ledger.lock_status(lock_key)["held"] is False

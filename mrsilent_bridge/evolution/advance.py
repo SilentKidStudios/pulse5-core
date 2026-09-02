@@ -750,13 +750,16 @@ def advance_one(proposal_id: str, *, requested_by: str = "autonomous_pipeline") 
     # Reuses job_ledger's exact claim/release/lock_status, on a proposal-
     # scoped virtual key (never a real job_id).
     lock_key = _proposal_lock_key(proposal_id)
-    if not job_ledger.claim(lock_key, owner=requested_by):
+    claimed, broke_stale_lock = job_ledger.claim_or_break_stale(lock_key, owner=requested_by)
+    if not claimed:
         status = job_ledger.lock_status(lock_key)
         stages.append(StageEvent("concurrency_claim", "blocked",
-                                  f"another process already holds the implementation claim for this proposal "
+                                  f"another process already holds a live implementation claim for this proposal "
                                   f"(owner={status.get('owner')!r}, pid={status.get('pid')})"))
         return _finish(p, stages, p.implementation_job_id, "concurrent_advancer_blocked", None, "n/a")
-    stages.append(StageEvent("concurrency_claim", "ok", f"claimed by {requested_by!r}"))
+    stages.append(StageEvent("concurrency_claim", "ok",
+                              f"claimed by {requested_by!r}" +
+                              (" (broke a proposal-level lock left behind by a dead prior advancer)" if broke_stale_lock else "")))
 
     try:
         # PROPOSE: formal transition out of raw OBSERVED, if not already there.

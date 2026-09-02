@@ -410,8 +410,11 @@ def release(job_id: str, *, owner: str = "unspecified") -> bool:
 
 
 def break_stale_lock(job_id: str, *, requested_by: str) -> bool:
-    """Explicit-only: never called automatically by the harness mid-run.
-    Refuses unless the lock is genuinely stale (dead pid or aged out)."""
+    """Refuses unless the lock is genuinely stale (dead pid or aged out) or
+    corrupt. Called explicitly by cli.py/autonomous_cycle.py's own startup
+    reconciliation, and automatically-but-boundedly by claim_or_break_stale()
+    below — never blindly, always gated by lock_status()'s own dead-pid/
+    aged-out check."""
     status = lock_status(job_id)
     if not status.get("held"):
         return False
@@ -419,3 +422,33 @@ def break_stale_lock(job_id: str, *, requested_by: str) -> bool:
         return False
     _lock_path(job_id).unlink(missing_ok=True)
     return True
+
+
+def claim_or_break_stale(job_id: str, *, owner: str = "unspecified") -> tuple[bool, bool]:
+    """Same atomic claim as claim(), but when the claim fails because the
+    existing lock is itself provably stale (dead pid, or aged past
+    STALE_AFTER_S — the exact same criteria break_stale_lock() already
+    enforces), breaks that ONE stale lock and retries the claim exactly
+    once. A lock held by a live, non-aged owner is NEVER broken or raced —
+    that case still returns (False, False), byte-for-byte the same outcome
+    claim() alone would give.
+
+    Closes a real gap: is_stale()/classify() correctly call a job (or a
+    proposal-impl-* virtual lock) recovery-eligible once its OWNER process
+    is provably dead, but the orphaned per-job/per-proposal lock FILE that
+    dead owner left behind (never reaching its own `finally: release()`)
+    previously blocked every future claim() forever — resume_job() would
+    refuse indefinitely, callers would fall through to a fresh attempt, and
+    that fresh attempt would then be correctly deduped against the very
+    same still-non-terminal stale record: a permanent mutated=false
+    stalemate with no automatic path back to healthy. break_stale_lock()
+    already existed for exactly this scenario but nothing in the resume/
+    advance path ever called it (see bridge.py/omniengineer_harness.py
+    resume_job() and evolution/advance.py advance_one()). Returns
+    (claimed, broke_a_stale_lock) so callers can record the break in their
+    own durable receipt/audit trail."""
+    if claim(job_id, owner=owner):
+        return True, False
+    if break_stale_lock(job_id, requested_by=owner):
+        return claim(job_id, owner=owner), True
+    return False, False

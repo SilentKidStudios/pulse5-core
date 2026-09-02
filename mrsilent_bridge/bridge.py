@@ -296,14 +296,17 @@ def resume_job(job_id: str, *, requested_by: str = "recovery") -> JobResult:
                    else "heartbeat is not yet stale — a live process may still own this job; resume refused to avoid racing it")
         return _recovery_refusal(record, policy, reason)
 
-    if not job_ledger.claim(job_id, owner=requested_by):
+    claimed, broke_stale_lock = job_ledger.claim_or_break_stale(job_id, owner=requested_by)
+    if not claimed:
         status = job_ledger.lock_status(job_id)
         return _recovery_refusal(record, RecoveryPolicy.ESCALATE,
-                                  f"another process already holds the claim on this job (owner={status.get('owner')!r}, pid={status.get('pid')}); refusing to resume concurrently")
+                                  f"another process already holds a live claim on this job (owner={status.get('owner')!r}, pid={status.get('pid')}); refusing to resume concurrently")
 
     try:
-        job_ledger.checkpoint(job_id, record.state, resume_count=record.resume_count + 1,
-                               note=f"resume attempt started (policy={policy.value})")
+        note = f"resume attempt started (policy={policy.value})"
+        if broke_stale_lock:
+            note += " — broke a job-level lock left behind by a dead prior owner"
+        job_ledger.checkpoint(job_id, record.state, resume_count=record.resume_count + 1, note=note)
         params = record.submit_params or {}
         task = record.task
         copy_source_paths = policy == RecoveryPolicy.SAFE_RESUME
