@@ -1374,6 +1374,102 @@
         "until": null,
         "reason": null
       }
+    },
+    {
+      "capability_id": "omnisim_v1",
+      "canonical_name": "OmniSim Scenario/Decision-Support Engine",
+      "name": "OmniSim Scenario/Decision-Support Engine",
+      "location": "/opt/pulse5-core/omnisim/api/request_scenario.py",
+      "division": "omnisim (this project)",
+      "provider": "omnisim (this project)",
+      "organ": "OmniSim Scenario/Decision-Support Engine",
+      "purpose": "Governed what-if / decision-support scenario analysis via 3 transparent heuristic/arithmetic engines (decision_heuristic, resource_model, comparative_scenario). Not a predictive model.",
+      "task_types": [
+        "scenario_analysis",
+        "decision_support",
+        "resource_projection"
+      ],
+      "available_actions": [
+        "request_scenario(question, assumptions=None, options=None, *, scenario_type=..., variables=..., constraints=..., requested_outputs=...)"
+      ],
+      "io_contract": "in: question (str) + scenario_type + variables/constraints (dict); out: structured result with scenario_outputs, uncertainty, risks, limitations, receipt path",
+      "working_scope": "own division directory only (writes bounded to its own receipts/state/reports paths)",
+      "cost_class": "free_local (pure Python, no external calls, no paid compute)",
+      "risk_class": "decision_support_only_no_execution_authority",
+      "authority_requirements": "none for this decision-support capability itself; any downstream action still requires the same protected-gate approvals as everything else in the Studio",
+      "required_approvals": "none for invocation; not applicable (no execution/production/financial authority)",
+      "dependencies": [
+        "omnisim/weights/signal_weights_active.json (decision_heuristic engine only)"
+      ],
+      "health_status_method": "python3 -m pytest omnisim/tests/test_request_scenario.py",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "omnisim/tests/test_request_scenario.py (4/4 passing, independently re-run 2026-09-02); live systemd timer omnisim-loop.timer",
+      "cooperates_with": [
+        "omnioracle_v1"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "reason": null
+      },
+      "evidence_basis": "omnisim/reports/omnisim_v1_certification_20260831.json (self-reported, disclaimer-qualified) + independent re-run of its test suite across all 4 campaign sessions (2026-09-02) + live canary via divisions/omnioracle/api/request_oracle.py's also_run_omnisim_scenario ensemble path",
+      "known_limitations": [
+        "services/th3_mcp/tools.py (hardcoded direct import, not via this registry, as of 2026-09-02)"
+      ],
+      "founder_decision_note": "Merged 2026-09-02 per explicit Founder approval of the bounded registry-only integration described in this session's prior report (capabilities.json only, decision_support_only_no_execution_authority preserved, NOT added to studio_router._CAPABILITY_TO_ADAPTER)."
+    },
+    {
+      "capability_id": "omnioracle_v1",
+      "canonical_name": "Omni Oracle Forecast/Consensus Facade",
+      "name": "Omni Oracle Forecast/Consensus Facade",
+      "location": "/opt/pulse5-core/divisions/omnioracle/api/request_oracle.py",
+      "division": "omnioracle (this project)",
+      "provider": "omnioracle (this project)",
+      "organ": "Omni Oracle Forecast/Consensus Facade",
+      "purpose": "Canonical read/aggregate (and opt-in generate) facade over the OmniOracle forecast/consensus pipeline (probabilistic_forecast_engine, consensus_intelligence_layer, recursive_simulation_engine, scenario_branch_generator, forecast_ledger, forecast_outcome_verifier, real_signal_connector). This pipeline had no function-callable request/response API before 2026-09-02.",
+      "task_types": [
+        "forecast_read",
+        "forecast_generate",
+        "consensus_aggregation",
+        "oracle_health_check",
+        "calibration_lifecycle"
+      ],
+      "available_actions": [
+        "request_oracle(domain, question=None, *, mode='read'|'generate', seed=None, min_evidence=0, also_run_omnisim_scenario=None)",
+        "oracle_health.health()",
+        "forecast_outcome_verifier/calibration.py:record_real_outcome(forecast_id, actual_outcome, correct, ...)"
+      ],
+      "io_contract": "in: domain (str, must be non-empty), mode, min_evidence; out: status (ok|insufficient_evidence), observations (real counts), synthetic_projection (canonical_forecast_result schema, provenance-labeled), live_signals (real machine telemetry, provenance='live'), forecast_id (immutable, calibration-ready), receipt path",
+      "working_scope": "own division directory only (writes bounded to its own receipts/state/reports paths)",
+      "cost_class": "free_local (pure Python + subprocess to local scripts, no external calls, no paid compute)",
+      "risk_class": "decision_support_only_no_execution_authority",
+      "authority_requirements": "none for this decision-support capability itself; any downstream action still requires the same protected-gate approvals as everything else in the Studio",
+      "required_approvals": "none for invocation; not applicable (no execution/production/financial authority)",
+      "dependencies": [
+        "omnioracle-continuous-daemon.timer (systemd, live, populates the evidence this facade reads)"
+      ],
+      "health_status_method": "python3 divisions/omnioracle/api/oracle_health.py",
+      "status": "active",
+      "availability": "available",
+      "validation_method": "divisions/omnioracle/tests/ (96/96 passing as of commit af045ba, incl. determinism, fail-closed, live-signal, and calibration-lifecycle coverage); live canaries run each campaign session",
+      "cooperates_with": [
+        "omnisim_v1"
+      ],
+      "locality": "local",
+      "quota_status": {
+        "limited": false,
+        "reason": null
+      },
+      "evidence_basis": "divisions/omnioracle/final_godmode_audit/reports/omnioracle_final_godmode_gap_audit_v1.json (2026-05-07, honest_status=TRUE_GOD_MODE_FOUNDATION_LOCKED_NEEDS_LONG_TERM_REALITY_CALIBRATION) + 4 independent campaign sessions' code review, 96-test regression suite, and live canaries (2026-09-01 through 2026-09-02, commits f313b50/27f0b8f/af045ba)",
+      "known_limitations": [
+        "confidence/risk are deterministic (seeded Monte Carlo + real evidence counts) as of commit f313b50, but still labeled provenance=\"synthetic\" for 4 of 5 real_signal_connector sources -- only SIG_SYSTEM_RUNTIME (local machine telemetry) is live as of commit af045ba, and only fused into the runtime_autonomy domain specifically",
+        "SIG_APPROVAL_PATTERNS and SIG_STUDIO_ACTIVITY remain unwired pending an unambiguous release of the concurrent mr_silent_spine campaign (deferred again this round -- see this campaign's final report)",
+        "SIG_SOCIAL_TRENDS and SIG_MARKET_INTEL need real paid external API credentials -- not activated, PAID_AUTHORIZATION_REQUIRED",
+        "forecast_outcome_verifier/calibration.py's real-outcome mechanism is proven (test fixtures only) but has recorded zero genuine real-world outcomes as of this writing",
+        "not wired into services/th3_mcp/tools.py as of this writing -- deferred pending unambiguous confirmation the concurrent session has released it (see this campaign's final report)"
+      ],
+      "founder_decision_note": "Merged 2026-09-02 per explicit Founder approval of the bounded registry-only integration described in this session's prior report (capabilities.json only, decision_support_only_no_execution_authority preserved, NOT added to studio_router._CAPABILITY_TO_ADAPTER)."
     }
   ]
 }

@@ -162,7 +162,7 @@ TOOL_SPECS = [
     },
     {
         "name": "submit_work",
-        "description": "Submit a structured Studio objective. task_type accepts common labels like 'engineering' and normalizes them onto the real registered task_type ('code_edit') -- an unrecognized value still default-denies. Creates exactly one Proposal in the existing self-evolution pipeline if it can be safely classified (default-deny otherwise). Never executes anything synchronously -- only the existing, already-Founder-authorized 15-minute autonomous-cycle timer ever advances it, and only if classified low-risk, capped at PROMOTION_CANDIDATE (never auto-promoted to real files). paid_resources_allowed defaults to false and is a HARD eligibility filter enforced again at real execution time -- a metered/paid engine (e.g. Claude Code) can never be silently selected when false; if no free/local route exists, this returns NO_ELIGIBLE_FREE_LOCAL_ROUTE and creates no Proposal, rather than falling through to a paid one. No founder_approved override exists here.",
+        "description": "Submit a structured Studio objective. task_type accepts common labels like 'engineering' and normalizes them onto the real registered task_type ('code_edit') -- an unrecognized value still default-denies. Creates exactly one Proposal in the existing self-evolution pipeline if it can be safely classified (default-deny otherwise). Never executes anything synchronously -- only the existing, already-Founder-authorized 15-minute autonomous-cycle timer ever advances it, and only if classified low-risk, capped at PROMOTION_CANDIDATE (never auto-promoted to real files). paid_resources_allowed defaults to false and is a HARD eligibility filter enforced again at real execution time -- a metered/paid engine (e.g. Claude Code) can never be silently selected when false; if no free/local route exists, this returns NO_ELIGIBLE_FREE_LOCAL_ROUTE and creates no Proposal, rather than falling through to a paid one. No founder_approved override exists here. source_paths (optional, <=10 entries) authorizes SPECIFIC real canonical repository paths to be staged into the engineering sandbox if/when this Proposal is advanced -- reuses the existing, already-Founder-authorized Proposal.source_paths/context-staging/GATED_PATH_MARKERS pipeline; a path touching a protected marker is rejected (founder_gated) by the same authority check every other source_paths caller goes through, both here (first pass) and again, authoritatively, at real execution time.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -173,6 +173,7 @@ TOOL_SPECS = [
                 "requested_capabilities": {"type": "array", "items": {"type": "string", "maxLength": 100}, "maxItems": 20, "default": []},
                 "idempotency_key": {"type": "string", "maxLength": 200},
                 "paid_resources_allowed": {"type": "boolean", "default": False},
+                "source_paths": {"type": "array", "items": {"type": "string", "maxLength": 500}, "maxItems": 10, "default": [], "description": "real canonical repo-relative or absolute paths explicitly authorized to be staged into the sandbox if this Proposal is advanced; subject to GATED_PATH_MARKERS rejection"},
             },
             "required": ["objective"],
             "additionalProperties": False,
@@ -180,12 +181,12 @@ TOOL_SPECS = [
         "fn": lambda args: T.submit_work(
             args.get("objective", ""), args.get("task_type", ""), args.get("context", ""),
             args.get("priority_hint", ""), args.get("requested_capabilities", []), args.get("idempotency_key"),
-            args.get("paid_resources_allowed", False),
+            args.get("paid_resources_allowed", False), args.get("source_paths", []),
         ),
     },
     {
         "name": "work_result",
-        "description": "Read-only. Current lifecycle state of a submit_work item: objective, status, classification, latest implementation attempt (engine, validation/canary result) if any, approval state, and history. Never fabricates a result that isn't on disk.",
+        "description": "Read-only. Current lifecycle state of a submit_work item: objective, status, classification, latest implementation attempt (engine, validation/canary result) if any, approval state, source_paths (if any were authorized on submission), and history. Never fabricates a result that isn't on disk.",
         "inputSchema": {
             "type": "object",
             "properties": {"work_id": {"type": "string", "maxLength": 200}},

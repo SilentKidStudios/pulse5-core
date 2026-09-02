@@ -547,7 +547,7 @@ def continuum_status() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _first_pass_classify(objective: str, task_type: str, context: str, requested_capabilities: list[str], paid_resources_allowed: bool) -> tuple[str, list[str]]:
+def _first_pass_classify(objective: str, task_type: str, context: str, requested_capabilities: list[str], paid_resources_allowed: bool, source_paths: list[str] | None = None) -> tuple[str, list[str]]:
     """Conservative, defense-in-depth first-pass risk_score for a submit_work
     request, using the SAME gating constants authority_policy.classify() uses
     (not a substitute for it -- the real execution engines independently
@@ -561,12 +561,27 @@ def _first_pass_classify(objective: str, task_type: str, context: str, requested
     allow_paid=...)), not a soft score -- when False and the only capable
     route for task_type is a paid/metered one, this returns the distinct
     'no_eligible_free_local_route' classification instead of silently
-    falling through to founder_gated-then-maybe-approved-into-paid."""
-    combined_text = " ".join([objective or "", str(context or ""), task_type or "", " ".join(requested_capabilities)])
+    falling through to founder_gated-then-maybe-approved-into-paid.
+
+    source_paths gets the SAME first-pass keyword scan as objective/context
+    (defense in depth only) -- the real, authoritative check is
+    authority_policy.classify()'s own source_paths loop against
+    GATED_PATH_MARKERS, independently re-run at real execution time inside
+    omniengineer_harness.submit_job_auto() (see evolution/advance.py's
+    _run_omni_engineer()); this first pass cannot and does not substitute for it."""
+    combined_text = " ".join(
+        [objective or "", str(context or ""), task_type or "", " ".join(requested_capabilities), " ".join(source_paths or [])]
+    )
 
     keyword_hits = sorted({p.pattern for p in authority_policy.GATED_KEYWORDS if p.search(combined_text)})
     if keyword_hits:
-        return "founder_gated", [f"objective/context matched gated keyword pattern(s): {keyword_hits}"]
+        return "founder_gated", [f"objective/context/source_paths matched gated keyword pattern(s): {keyword_hits}"]
+
+    path_marker_hits = sorted(
+        {marker for path in (source_paths or []) for marker in authority_policy.GATED_PATH_MARKERS if marker.lower() in path.lower()}
+    )
+    if path_marker_hits:
+        return "founder_gated", [f"source_paths touched protected marker(s): {path_marker_hits}"]
 
     gated_capability_hits = sorted(set(requested_capabilities) & authority_policy.GATED_TOOLS)
     if gated_capability_hits:
@@ -590,6 +605,33 @@ def _first_pass_classify(objective: str, task_type: str, context: str, requested
     return "founder_gated", [f"no eligible non-gated capability currently registered for task_type={task_type!r} -- default deny rather than guess a route"]
 
 
+def _normalize_source_path(raw: str) -> str:
+    """Resolve a caller-supplied source_path to an ABSOLUTE path rooted at ROOT
+    (/opt/pulse5-core) before it ever reaches Proposal.source_paths.
+
+    ROOT-CAUSE NOTE (found via this campaign's own live canary, 2026-09-02):
+    mrsilent-autonomous-cycle.service's WorkingDirectory is
+    /opt/pulse5-core/mrsilent_bridge, NOT /opt/pulse5-core -- so a caller-natural
+    repo-relative path like "mrsilent_bridge/context_staging.py" silently resolves
+    to a NONEXISTENT path when omniengineer_harness.py's `Path(p).is_file()` check
+    runs inside that service, and the file is never staged (no error, no
+    exclusion record -- it just silently doesn't copy, since neither is_dir() nor
+    is_file() matches). Confirmed by direct observation: a canary submitted with a
+    bare relative path produced a sandbox the agent itself described as empty.
+    Normalizing here, at the one shared MCP-facing entry point, fixes this for
+    every caller regardless of which service's cwd ends up evaluating it later --
+    an already-absolute path (or one starting with ROOT) passes through
+    unchanged, exactly preserving the prior behavior for any caller that already
+    knew to supply one. The 500-char bound is applied to the FINAL (possibly
+    ROOT-prefixed) string, not the raw input, so a caller-supplied relative path
+    can't exceed it once normalized -- a truncated result simply fails is_file()/
+    is_dir() harmlessly downstream rather than resolving to something unintended."""
+    text = str(raw)
+    p = Path(text)
+    result = text if p.is_absolute() else str(ROOT / text)
+    return result[:500]
+
+
 def submit_work(
     objective: str,
     task_type: str = "",
@@ -598,6 +640,7 @@ def submit_work(
     requested_capabilities: list | None = None,
     idempotency_key: str | None = None,
     paid_resources_allowed: bool = False,
+    source_paths: list | None = None,
 ) -> dict:
     """Accepts a structured Studio objective and creates exactly one canonical
     Proposal (evolution/proposal.py) if -- and only if -- a safe classification
@@ -612,12 +655,33 @@ def submit_work(
     evolution/advance.py._implementation_router() -> studio_router.rank(
     allow_paid=...) -- so even if availability changes between submission
     and the timer picking it up 15 minutes later, a paid engine can never be
-    silently selected for a proposal submitted with paid_resources_allowed=False."""
+    silently selected for a proposal submitted with paid_resources_allowed=False.
+
+    source_paths (SCHEMA PROPAGATION FIX, 2026-09-02): a bounded list (<=10
+    entries, <=500 chars each, normalized to absolute paths under ROOT via
+    _normalize_source_path -- see its docstring for the real cwd-mismatch bug
+    this closes) of real canonical repository paths this Proposal is
+    explicitly authorized to have staged into its engineering sandbox, if and
+    when it is advanced. This is NOT new backend behavior -- Proposal.
+    source_paths, evolution/advance.py's threading of it into
+    omniengineer_harness.submit_job_auto(), and authority_policy.classify()'s
+    GATED_PATH_MARKERS rejection of it already exist and are already
+    Founder-authorized (GOD_MODE_V1 FINAL GAP CLOSURE / GOVERNED CANONICAL
+    SOURCE STAGING REPAIR); this MCP-facing tool forwards the caller's
+    (normalized) list onto the same, already-governed Proposal field every
+    other creation path uses. Every source_path also gets the same first-pass
+    gated-keyword and GATED_PATH_MARKERS scan objective/context already get
+    (defense in depth only) -- the real, authoritative rejection is
+    authority_policy.classify()'s own source_paths check, independently
+    re-run at real execution time regardless of what this first pass finds.
+    Defaults to [] (byte-for-byte unchanged behavior for every existing
+    caller that doesn't pass it)."""
     objective = (objective or "").strip()
     if not objective:
         return {"accepted": False, "reason": "objective is required", "generated_at_utc": _now()}
 
     requested_capabilities = [str(c) for c in (requested_capabilities or [])][:20]
+    source_paths = [_normalize_source_path(p) for p in (source_paths or [])][:10]
     submitted_task_type = task_type
     task_type, task_type_was_normalized = _normalize_task_type(task_type)
 
@@ -636,14 +700,14 @@ def submit_work(
             "generated_at_utc": _now(),
         }
 
-    risk_score, reasons = _first_pass_classify(objective, task_type, context, requested_capabilities, paid_resources_allowed)
+    risk_score, reasons = _first_pass_classify(objective, task_type, context, requested_capabilities, paid_resources_allowed, source_paths)
 
     if risk_score == "no_eligible_free_local_route":
         return {
             "accepted": False,
             "reason": "NO_ELIGIBLE_FREE_LOCAL_ROUTE",
             "classification_reasons": reasons,
-            "routing": {"task_type_submitted": submitted_task_type, "task_type": task_type, "task_type_was_normalized": task_type_was_normalized, "requested_capabilities": requested_capabilities, "paid_resources_allowed": paid_resources_allowed},
+            "routing": {"task_type_submitted": submitted_task_type, "task_type": task_type, "task_type_was_normalized": task_type_was_normalized, "requested_capabilities": requested_capabilities, "paid_resources_allowed": paid_resources_allowed, "source_paths": source_paths},
             "note": "No Proposal was created. A capable engine exists for this task_type but only via a paid provider; resubmit with paid_resources_allowed=true if that's acceptable, or wait for a free/local capability to become available.",
             "generated_at_utc": _now(),
         }
@@ -655,6 +719,7 @@ def submit_work(
         origin="ct_mcp_bridge",
         fingerprint=fingerprint,
         paid_resources_allowed=paid_resources_allowed,
+        source_paths=source_paths or None,
     )
 
     return {
@@ -664,7 +729,7 @@ def submit_work(
         "classification_reasons": reasons,
         "founder_approval_required": risk_score != "low",
         "status": p.status,
-        "routing": {"task_type_submitted": submitted_task_type, "task_type": task_type, "task_type_was_normalized": task_type_was_normalized, "requested_capabilities": requested_capabilities, "priority_hint": priority_hint or None, "paid_resources_allowed": paid_resources_allowed},
+        "routing": {"task_type_submitted": submitted_task_type, "task_type": task_type, "task_type_was_normalized": task_type_was_normalized, "requested_capabilities": requested_capabilities, "priority_hint": priority_hint or None, "paid_resources_allowed": paid_resources_allowed, "source_paths": source_paths},
         "execution_path": (
             "Will be auto-advanced by the existing mrsilent-autonomous-cycle.timer (15-min cadence) -- capped at PROMOTION_CANDIDATE, never auto-promoted to real files."
             if risk_score == "low" else
@@ -720,6 +785,7 @@ def work_result(work_id: str) -> dict:
         "classification": p.risk_score,
         "status": p.status,
         "paid_resources_allowed": p.paid_resources_allowed,
+        "source_paths": p.source_paths,
         "approval_state": approval_state,
         "implementation_attempts": p.implementation_attempts,
         "implementation_job_ids": p.implementation_job_ids,
