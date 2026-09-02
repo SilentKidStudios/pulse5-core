@@ -15,28 +15,33 @@ and (optionally) trigger facade in front of the real, existing engines.
 
 HONESTY NOTE -- READ BEFORE TRUSTING ANY confidence/probability FIELD BELOW
 --------------------------------------------------------------------------
-The underlying engines this facade reads from (probabilistic_forecast_engine,
-consensus_intelligence_layer, recursive_simulation_engine) generate their
-confidence/risk/outcome values with Python's unseeded `random` module -- not
-a trained model, not a live external signal feed, and not calibrated against
-real outcomes. divisions/omnioracle/real_signal_connector's connectors are
-all explicitly "blueprint_ready" / "live_collection_enabled": false -- no
-live external data is ingested anywhere in this division as of this writing.
-forecast_outcome_verifier explicitly refuses to update reliability scores
-until real outcomes are confirmed ("real_outcome_required": true, "scoring_
-policy": "do_not_update_reliability_until_real_outcome_confirmed"). See also
-divisions/omnioracle/final_godmode_audit/reports/omnioracle_final_godmode_gap_audit_v1.json
-("true_operational_god_mode_declared": false).
+UPDATED 2026-09-02 (OMNI_ORACLE_REAL-FORECAST_ENGINE_CONVERGENCE campaign): the
+underlying engines this facade reads from (probabilistic_forecast_engine,
+consensus_intelligence_layer, recursive_simulation_engine, scenario_branch_generator)
+no longer use Python's unseeded `random` module. They now compute confidence/risk via
+divisions/omnioracle/api/deterministic_forecast_core.py: a transparent keyword
+heuristic over real input text, real evidence-artifact counts, and explicitly seeded
+Monte Carlo dispersion (or, in consensus_intelligence_layer, a real ensemble
+statistic over already-deterministic branch outputs -- no sampling at all). Same
+inputs always produce the same outputs; every result records the seed used.
 
-Therefore every "confidence"/"probability_band" value this facade surfaces is
-a SYNTHETIC PLACEHOLDER (result["synthetic_projection"]["synthetic"] is
-always True), not a calibrated statistical estimate and not evidence of
-real-world predictive accuracy. This facade separates real, counted
-`observations` (how many artifacts actually exist on disk right now) from
-that synthetic projection so a caller can never confuse the two. Treat the
-synthetic projection like a labeled mock in a UI prototype: useful for
-testing the pipeline shape, not a real forecast, until real_signal_connector
-goes live and forecast_outcome_verifier has accumulated real outcome history.
+This is NOT the same as real-world calibration, and callers must not conflate the
+two. divisions/omnioracle/real_signal_connector's connectors are all still explicitly
+"blueprint_ready" / "live_collection_enabled": false -- no live external data is
+ingested anywhere in this division as of this writing, so the scenario objectives and
+outcome vocabularies these engines score are still hardcoded bootstrap content, not
+live telemetry. forecast_outcome_verifier/calibration.py now provides a real hook to
+record genuine observed outcomes, but zero have been recorded as of this writing --
+see calibration_status in every result. See also
+divisions/omnioracle/final_godmode_audit/reports/omnioracle_final_godmode_gap_audit_v1.json
+("true_operational_god_mode_declared": false), which remains accurate.
+
+Therefore every "confidence"/"probability_band" value this facade surfaces is still
+labeled provenance="synthetic" (result["synthetic_projection"]["synthetic"]) --
+reproducible and evidence-derived-from-what-exists, but not a calibrated statistical
+estimate of real-world outcomes. This facade separates real, counted `observations`
+(how many artifacts actually exist on disk right now) from that synthetic projection
+so a caller can never confuse the two.
 
 Never represent output from this module as a guaranteed or calibrated
 prediction. Oracle has no authority to execute, dispatch, or approve
@@ -52,6 +57,9 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from deterministic_forecast_core import content_seed
+
 ORACLE = Path(__file__).resolve().parent.parent  # divisions/omnioracle
 RECEIPTS = Path(__file__).resolve().parent / "receipts"
 
@@ -66,9 +74,15 @@ KNOWN_DOMAINS = [
 # Real, existing engine scripts this facade reads from / can trigger.
 # It does not reimplement their logic -- it shells out to the same scripts
 # the live omnioracle-continuous-daemon.timer already runs.
+# Dependency order matters in "generate" mode: scenario_branch_generator produces the
+# branches recursive_simulation_engine expands, which consensus_intelligence_layer
+# votes over, which probabilistic_forecast_engine reads as its evidence.
+ENGINE_PIPELINE_ORDER = ["scenario_branch_generator", "recursive_simulation", "consensus", "probabilistic_forecast"]
 ENGINE_SCRIPTS = {
-    "probabilistic_forecast": ORACLE / "probabilistic_forecast_engine/omnioracle_probabilistic_forecast_engine_v1.py",
+    "scenario_branch_generator": ORACLE / "scenario_branch_generator/omnioracle_scenario_branch_generator_v1.py",
+    "recursive_simulation": ORACLE / "recursive_simulation_engine/omnioracle_recursive_simulation_engine_v1.py",
     "consensus": ORACLE / "consensus_intelligence_layer/omnioracle_consensus_intelligence_layer_v1.py",
+    "probabilistic_forecast": ORACLE / "probabilistic_forecast_engine/omnioracle_probabilistic_forecast_engine_v1.py",
 }
 
 FORECAST_DIR = ORACLE / "probabilistic_forecast_engine/forecasts"
@@ -161,13 +175,17 @@ def _domain_evidence(domain):
     }
 
 
-def _run_engine(script_path: Path, timeout=90):
+def _run_engine(script_path: Path, timeout=90, seed=None):
     if not script_path.exists():
         return {"engine": str(script_path), "ok": False, "status": "missing", "exit_code": None}
+    env = None
+    if seed is not None:
+        import os
+        env = {**os.environ, "OMNIORACLE_SEED_OVERRIDE": str(seed)}
     try:
         proc = subprocess.run(
             [sys.executable, str(script_path)],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, timeout=timeout, env=env,
         )
         return {
             "engine": str(script_path),
@@ -190,11 +208,13 @@ def request_oracle(domain, question=None, *, mode="read", seed=None, min_evidenc
         calls to this facade). Fully deterministic given fixed on-disk state --
         result["reproducible"] is True.
 
-    mode="generate": triggers the real probabilistic_forecast_engine and
-        consensus_intelligence_layer scripts fresh (the same scripts the live systemd
-        timer runs), then re-aggregates. These engines use unseeded `random` internally,
-        so result["reproducible"] is honestly reported False in this mode -- this facade
-        does not fabricate determinism it cannot provide.
+    mode="generate": triggers the real scenario_branch_generator -> recursive_simulation_engine
+        -> consensus_intelligence_layer -> probabilistic_forecast_engine pipeline fresh (the same
+        scripts the live systemd timer daemon can also invoke), then re-aggregates. As of the
+        2026-09-02 determinism rewrite these engines use only seeded/content-derived randomness
+        (divisions/omnioracle/api/deterministic_forecast_core.py) -- result["reproducible"] is True
+        given a fixed `seed` (or, if seed is omitted, a seed content-derived from `domain`, which is
+        still fully reproducible, just not caller-chosen).
 
     min_evidence: if the domain has fewer than this many forecast/ledger/consensus
         artifacts after aggregation, the request fails safely with
@@ -214,10 +234,11 @@ def request_oracle(domain, question=None, *, mode="read", seed=None, min_evidenc
 
     engine_runs = []
     reproducible = True
+    effective_seed = None
     if mode == "generate":
-        reproducible = False
-        for key in ("probabilistic_forecast", "consensus"):
-            engine_runs.append(_run_engine(ENGINE_SCRIPTS[key]))
+        effective_seed = seed if isinstance(seed, int) else content_seed(domain, str(seed) if seed is not None else "default")
+        for key in ENGINE_PIPELINE_ORDER:
+            engine_runs.append(_run_engine(ENGINE_SCRIPTS[key], seed=effective_seed))
 
     evidence = _domain_evidence(domain)
     evidence_count = (
@@ -227,6 +248,8 @@ def request_oracle(domain, question=None, *, mode="read", seed=None, min_evidenc
     )
 
     domain_recognized = domain in KNOWN_DOMAINS
+
+    reproducibility_info = {"deterministic": True, "seed": effective_seed, "mode": mode}
 
     if evidence_count < min_evidence:
         result = {
@@ -240,6 +263,7 @@ def request_oracle(domain, question=None, *, mode="read", seed=None, min_evidenc
             "evidence_count": evidence_count,
             "engine_runs": engine_runs,
             "reproducible": reproducible,
+            "reproducibility": reproducibility_info,
             "recommendation_boundary": RECOMMENDATION_BOUNDARIES,
         }
         _write_receipt(request_id, result)
@@ -248,14 +272,18 @@ def request_oracle(domain, question=None, *, mode="read", seed=None, min_evidenc
     latest = evidence.get("latest_forecast")
     synthetic_projection = None
     if latest:
+        # latest is now the canonical_forecast_result schema (deterministic_forecast_core.py):
+        # status/forecast/confidence/probability_band/risk/uncertainty/provenance/calibration_status.
         synthetic_projection = {
-            "synthetic": True,
+            "synthetic": latest.get("provenance", "synthetic") == "synthetic",
             "source_artifact": evidence["latest_forecast_path"],
-            "confidence_score": latest.get("confidence_score"),
+            "status": latest.get("status"),
+            "forecast": latest.get("forecast"),
+            "confidence": latest.get("confidence"),
             "probability_band": latest.get("probability_band"),
-            "risk_factor": latest.get("risk_factor"),
-            "estimated_success_probability": latest.get("estimated_success_probability"),
-            "recommended_action": latest.get("recommended_action"),
+            "risk": latest.get("risk"),
+            "calibration_status": latest.get("calibration_status"),
+            "reproducibility": latest.get("reproducibility"),
         }
 
     result = {
@@ -270,17 +298,22 @@ def request_oracle(domain, question=None, *, mode="read", seed=None, min_evidenc
         "synthetic_projection": synthetic_projection,
         "engine_runs": engine_runs,
         "reproducible": reproducible,
+        "reproducibility": reproducibility_info,
         "uncertainty": {
-            "kind": "synthetic_placeholder_pending_real_signal_ingestion",
-            "note": "See module docstring: confidence/probability values above are generated by unseeded "
-                    "random sampling in the underlying engines, not a calibrated model or live data. "
-                    "Do not treat them as real predictive accuracy.",
+            "kind": "deterministic_evidence_and_seeded_monte_carlo",
+            "note": "As of the 2026-09-02 determinism rewrite, confidence/probability values are computed by "
+                    "divisions/omnioracle/api/deterministic_forecast_core.py from real evidence counts, a "
+                    "transparent text heuristic, and explicitly seeded Monte Carlo dispersion -- never an "
+                    "unconditioned random draw. This still does not constitute calibrated real-world predictive "
+                    "accuracy: see calibration_status in synthetic_projection and known limitations below.",
         },
         "limitations": [
             "No live external signal ingestion exists yet (real_signal_connector connectors are all "
-            "blueprint_ready, live_collection_enabled=false).",
-            "forecast_outcome_verifier will not update reliability scores until real outcomes are "
-            "confirmed (real_outcome_required=true).",
+            "blueprint_ready, live_collection_enabled=false) -- underlying scenario/objective content is "
+            "still bootstrap data, not live telemetry.",
+            "forecast_outcome_verifier will not roll a prediction into real_accuracy_rate until a genuine "
+            "observed outcome is recorded via forecast_outcome_verifier/calibration.py:record_real_outcome() "
+            "-- zero real outcomes recorded as of this writing.",
         ],
         "recommendation_boundary": RECOMMENDATION_BOUNDARIES,
     }
