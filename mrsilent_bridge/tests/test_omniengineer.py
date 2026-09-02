@@ -1250,6 +1250,75 @@ def test_h4_agent_loop_uses_normalized_backend_seam() -> None:
     )
 
 
+# ---- OLLAMA_NUM_CTX_REPAIR (Founder-authorized, 2026-09-02) ----------------
+#
+# _call_ollama() never sent an explicit num_ctx, so Ollama silently ran the
+# model at its own small default context window (confirmed live: 4096
+# tokens) regardless of MAX_TRANSCRIPT_CHARS's 60,000-character budget --
+# causing exact-match patches against a real ~21KB seeded file to fail
+# repeatedly. Fixed by sending options.num_ctx=OLLAMA_NUM_CTX (32768,
+# empirically confirmed to load fully GPU-resident with headroom) on every
+# real Ollama request, scoped to _call_ollama() only -- Provider B and any
+# other non-Ollama backend are structurally untouched.
+
+def test_ollama_request_carries_explicit_finite_num_ctx() -> None:
+    """A/B/C: the real Ollama request payload explicitly carries
+    options.num_ctx, it is finite and greater than the old silent default
+    (4096), and it matches the module's configured, documented-safe
+    constant (itself well below qwen3-coder:30b's real model-reported max
+    of 262144, confirmed live via /api/show)."""
+    import json as _json
+    import urllib.request as _urlreq
+
+    captured: dict = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return _json.dumps({"response": '{"thought":"x","tool":"finish","args":{"summary":"ok"}}'}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        captured["data"] = _json.loads(req.data.decode())
+        return _FakeResponse()
+
+    original_urlopen = _urlreq.urlopen
+    _urlreq.urlopen = fake_urlopen
+    try:
+        agent._call_ollama("hello", model="qwen3-coder:30b", timeout_s=5)
+    finally:
+        _urlreq.urlopen = original_urlopen
+
+    check("the real Ollama request payload includes an options.num_ctx field",
+          "options" in captured.get("data", {}) and "num_ctx" in captured["data"].get("options", {}),
+          captured.get("data"))
+
+    sent_num_ctx = captured.get("data", {}).get("options", {}).get("num_ctx")
+    check("num_ctx sent on the wire is a finite int greater than the old silent default (4096)",
+          isinstance(sent_num_ctx, int) and sent_num_ctx > 4096, sent_num_ctx)
+    check("num_ctx sent on the wire equals the module's configured OLLAMA_NUM_CTX constant",
+          sent_num_ctx == agent.OLLAMA_NUM_CTX, (sent_num_ctx, agent.OLLAMA_NUM_CTX))
+    check("OLLAMA_NUM_CTX itself is finite and stays well below qwen3-coder:30b's real model-reported max (262144)",
+          isinstance(agent.OLLAMA_NUM_CTX, int) and 4096 < agent.OLLAMA_NUM_CTX <= 262144, agent.OLLAMA_NUM_CTX)
+
+
+def test_provider_b_path_is_structurally_unaffected_by_ollama_num_ctx() -> None:
+    """D: non-Ollama providers are unaffected. Provider B's call path does
+    not go through _call_ollama() at all -- it cannot ever carry an
+    Ollama-specific options.num_ctx field, and the fix touched no shared
+    code either backend depends on."""
+    import inspect
+    source = inspect.getsource(agent._call_provider_b)
+    check("_call_provider_b's implementation never references OLLAMA_NUM_CTX or num_ctx",
+          "OLLAMA_NUM_CTX" not in source and "num_ctx" not in source, source)
+    check("_call_provider_b delegates to provider_b_bridge.generate, a structurally separate call path from _call_ollama",
+          "provider_b_bridge.generate(" in source, source)
+
+
 # ---- integration tests (live Ollama call — genuinely proven, not mocked) ---
 
 def test_full_target_loop_live() -> None:
@@ -2127,6 +2196,8 @@ if __name__ == "__main__":
     test_submit_job_auto_dispatches_complex_task_to_submit_job_decomposed()
     test_decomposed_phase_iteration_ceiling_is_ten_and_finite()
     test_submit_job_auto_decomposed_path_still_wired_to_the_module_ceiling()
+    test_ollama_request_carries_explicit_finite_num_ctx()
+    test_provider_b_path_is_structurally_unaffected_by_ollama_num_ctx()
     test_context_staging_excludes_secret_paths_by_default()
     test_context_staging_excludes_manual_candidates_and_backups_by_default()
     test_decomposed_source_paths_are_staged_and_excluded_ones_are_recorded_not_copied()

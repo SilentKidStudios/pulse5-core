@@ -97,6 +97,23 @@ MAX_FILE_SIZE_CHARS = 327_680  # <=Founder-authorized ceiling; ~230KB real asset
 MAX_PATCH_GENERATED_CHARS = 200_000
 MAX_TRANSCRIPT_CHARS = 60_000  # context-size safeguard; oldest turns truncated first
 
+# OLLAMA_NUM_CTX_REPAIR (Founder-authorized, 2026-09-02): _call_ollama() below
+# never sent an explicit num_ctx, so Ollama silently used its own small
+# default context window (confirmed live: 4096 tokens) regardless of
+# MAX_TRANSCRIPT_CHARS above -- a real ~21KB seeded source file plus a few
+# turns of transcript can exceed 4096 tokens on its own, causing the model
+# to lose the exact file content apply_patch_sandbox needs for an exact-match
+# old_string, well before MAX_TRANSCRIPT_CHARS's own 60,000-character budget
+# is reached. 32768 tokens was chosen empirically, not assumed: confirmed via
+# a real /api/generate load call to hold comfortable headroom over
+# MAX_TRANSCRIPT_CHARS (60,000 chars is ~15,000-24,000 tokens depending on
+# content density -- comfortably under 32768 in every realistic case), stays
+# far below qwen3-coder:30b's own model-reported max (262144, confirmed via
+# /api/show's model_info.qwen3moe.context_length), and was confirmed to load
+# fully GPU-resident with headroom to spare (~1GB free of 20GB VRAM) rather
+# than spilling to slower CPU/RAM. Finite, bounded, never "unlimited".
+OLLAMA_NUM_CTX = 32768
+
 TOOL_NAMES = frozenset({
     "list_files", "read_file", "grep", "inspect_diff",
     "write_file_sandbox", "apply_patch_sandbox",
@@ -184,7 +201,10 @@ def _safe_path(sandbox: Path, rel: str) -> Path | None:
 
 
 def _call_ollama(prompt: str, *, model: str, timeout_s: int) -> str:
-    payload = json.dumps({"model": model, "prompt": prompt, "stream": False, "format": _TOOL_CALL_JSON_SCHEMA}).encode()
+    payload = json.dumps({
+        "model": model, "prompt": prompt, "stream": False, "format": _TOOL_CALL_JSON_SCHEMA,
+        "options": {"num_ctx": OLLAMA_NUM_CTX},
+    }).encode()
     req = urllib.request.Request(
         f"{OLLAMA_BASE_URL}/api/generate", data=payload,
         headers={"Content-Type": "application/json"}, method="POST",
