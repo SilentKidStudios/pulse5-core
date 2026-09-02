@@ -45,6 +45,7 @@ import job_ledger  # noqa: E402
 import studio_router  # noqa: E402
 import capability_registry  # noqa: E402
 import authority_policy  # noqa: E402
+import secret_path_policy  # noqa: E402
 from evolution import proposal as proposal_mod  # noqa: E402
 STATE = ROOT / "mr_silent_spine" / "state"
 BUS_INBOX = ROOT / "mr_silent_spine" / "division_signal_bus" / "inbox"
@@ -577,6 +578,14 @@ def _first_pass_classify(objective: str, task_type: str, context: str, requested
     if keyword_hits:
         return "founder_gated", [f"objective/context/source_paths matched gated keyword pattern(s): {keyword_hits}"]
 
+    # source_paths arrives here already resolved+ROOT-joined by
+    # _normalize_source_path -- an out-of-ROOT path (e.g. a caller-supplied
+    # already-absolute path like /etc/shadow, or a symlink that resolved
+    # outside the repo) must still never pass, regardless of marker matching.
+    out_of_root_hits = [path for path in (source_paths or []) if not secret_path_policy.is_within_root(Path(path))]
+    if out_of_root_hits:
+        return "founder_gated", [f"source_paths resolve outside the canonical repository root ({secret_path_policy.ROOT}): {out_of_root_hits}"]
+
     path_marker_hits = sorted(
         {marker for path in (source_paths or []) for marker in authority_policy.GATED_PATH_MARKERS if marker.lower() in path.lower()}
     )
@@ -621,15 +630,26 @@ def _normalize_source_path(raw: str) -> str:
     Normalizing here, at the one shared MCP-facing entry point, fixes this for
     every caller regardless of which service's cwd ends up evaluating it later --
     an already-absolute path (or one starting with ROOT) passes through
-    unchanged, exactly preserving the prior behavior for any caller that already
-    knew to supply one. The 500-char bound is applied to the FINAL (possibly
-    ROOT-prefixed) string, not the raw input, so a caller-supplied relative path
-    can't exceed it once normalized -- a truncated result simply fails is_file()/
-    is_dir() harmlessly downstream rather than resolving to something unintended."""
+    unchanged (modulo resolution, see below), exactly preserving the prior
+    behavior for any caller that already knew to supply one. The 500-char
+    bound is applied to the FINAL (possibly ROOT-prefixed) string, not the
+    raw input, so a caller-supplied relative path can't exceed it once
+    normalized -- a truncated result simply fails is_file()/is_dir()
+    harmlessly downstream rather than resolving to something unintended.
+
+    TRAVERSAL-SAFETY HARDENING (2026-09-02, SECRET / CREDENTIAL SOURCE-STAGING
+    HARDENING campaign): also resolves '..'/'.' segments and symlinks via
+    secret_path_policy.resolve_path(), so e.g. "mrsilent_bridge/../secure_keys/
+    anthropic.key" or a symlink like .env.central (-> /etc/pulse5.env) can't
+    reach a marker-matching bypass or escape ROOT by construction -- every
+    downstream marker/boundary check (here, in _first_pass_classify, in
+    authority_policy.classify(), and in context_staging) operates on this same
+    canonical, already-resolved string."""
     text = str(raw)
     p = Path(text)
-    result = text if p.is_absolute() else str(ROOT / text)
-    return result[:500]
+    joined = text if p.is_absolute() else str(ROOT / text)
+    resolved = str(secret_path_policy.resolve_path(joined))
+    return resolved[:500]
 
 
 def submit_work(

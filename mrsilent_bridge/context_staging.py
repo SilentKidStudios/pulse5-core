@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import secret_path_policy
+
 CONTEXT_STAGING_DEFAULT_EXCLUDED_MARKERS = (
     "manual_candidates",
     "continuity_backup",
@@ -46,19 +48,35 @@ CONTEXT_STAGING_DEFAULT_EXCLUDED_MARKERS = (
     "/.ssh",
     "/.aws",
     "/.config/gcloud",
-)
+    # Extended 2026-09-02 (SECRET / CREDENTIAL SOURCE-STAGING HARDENING
+    # campaign) -- see secret_path_policy.py's docstring for the read-only
+    # audit these came from. Shared with authority_policy.GATED_PATH_MARKERS
+    # so the two layers never drift apart on what counts as secret-bearing.
+) + secret_path_policy.NEW_CONFIRMED_SECRET_MARKERS
 
 
 def stage_context_source_paths(source_paths: list[Path]) -> tuple[list[Path], list[dict[str, str]]]:
     """Splits caller-provided source_paths into (allowed, excluded) per the
-    default-exclusion markers above. Returns the excluded list with its
-    matched marker for durable, honest recording -- callers never silently
-    lose a path without a reason on record."""
+    default-exclusion markers above, PLUS an explicit ROOT-boundary check
+    (2026-09-02 hardening) and traversal-safe resolution -- both checks run
+    against secret_path_policy.resolve_path(p), not the raw caller string, so
+    '..' segments or a symlink alias (e.g. .env.central -> /etc/pulse5.env)
+    can't hide a marker or escape the repository. The RETURNED `allowed`
+    entries are the caller's original (unresolved) Path objects, unchanged --
+    only the exclusion DECISION uses the resolved form. Returns the excluded
+    list with its matched marker/reason for durable, honest recording --
+    callers never silently lose a path without a reason on record."""
     allowed: list[Path] = []
     excluded: list[dict[str, str]] = []
     for p in source_paths:
         p_str = str(p)
-        marker = next((m for m in CONTEXT_STAGING_DEFAULT_EXCLUDED_MARKERS if m.lower() in p_str.lower()), None)
+        resolved = secret_path_policy.resolve_path(p)
+
+        if not secret_path_policy.is_within_root(resolved):
+            excluded.append({"path": p_str, "excluded_marker": "outside_canonical_root"})
+            continue
+
+        marker = secret_path_policy.matches_secret_marker(resolved, CONTEXT_STAGING_DEFAULT_EXCLUDED_MARKERS)
         if marker:
             excluded.append({"path": p_str, "excluded_marker": marker})
         else:
