@@ -362,6 +362,27 @@ def retry_ready_at(failed_at: str, attempt: int) -> str:
     return new_dt.isoformat()
 
 
+def is_retry_ready(ready_at: str, now: str) -> bool:
+    """Pure comparison of two ISO-8601 UTC timestamp strings: True iff `now`
+    is at or past `ready_at`. Reads no wall clock itself, so it gives the
+    correct answer no matter how often or how finely spaced the caller
+    invokes it -- there is no dependency on any particular check cadence
+    (e.g. once per hour) for the readiness decision to be correct."""
+    try:
+        dt_ready = datetime.fromisoformat(ready_at)
+    except Exception:
+        raise
+    if dt_ready.tzinfo is None:
+        dt_ready = dt_ready.replace(tzinfo=timezone.utc)
+    try:
+        dt_now = datetime.fromisoformat(now)
+    except Exception:
+        raise
+    if dt_now.tzinfo is None:
+        dt_now = dt_now.replace(tzinfo=timezone.utc)
+    return dt_now >= dt_ready
+
+
 def should_stop_for_gate_decision(risk_class: str | None, approval_state: str | None, authority_state: str | None) -> bool:
     """Return True if a gate decision should stop retrying.
     This implements the rule that stops automatic retrying when authority
