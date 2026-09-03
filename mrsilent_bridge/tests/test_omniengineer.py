@@ -1610,6 +1610,211 @@ def test_agent_loop_path_still_sends_the_original_tool_call_schema_unaffected() 
           captured.get("data", {}).get("format") == agent._TOOL_CALL_JSON_SCHEMA, captured.get("data"))
 
 
+# ---- NATIVE_TOOL_EXECUTION_PROFILE (Founder-authorized, 2026-09-02) --------
+#
+# Root cause: even after the SINGLE_SHOT_SCHEMA_REPAIR above, gpt-oss:20b
+# still failed single-shot: /api/generate + a `format` grammar constraint is
+# incompatible with this model's Harmony response behavior on this
+# installation (mechanically proven: raw curl against /api/generate with a
+# correct schema still returned an empty `response` despite a non-zero
+# eval_count). /api/chat + a real `tools` array (the model's own native
+# function-calling behavior, not grammar-constrained decoding) does work.
+# Added request_mode="native_tools" as an explicit opt-in alternate profile;
+# request_mode="format_constrained" (the default) is byte-for-byte the
+# pre-existing code path and is unaffected.
+
+def test_single_shot_native_tools_sends_chat_endpoint_with_tool_definition() -> None:
+    """request_mode="native_tools" hits /api/chat (not /api/generate) with a
+    real `tools` array carrying SINGLE_SHOT_PATCH_JSON_SCHEMA, and a
+    `messages` list -- never the old `format`-constrained /api/generate
+    shape."""
+    import urllib.request as _urlreq
+
+    captured: dict = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"message": {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_1", "function": {"name": "submit_patch", "arguments": {"files": []}}}
+            ]}}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["data"] = json.loads(req.data.decode())
+        return _FakeResponse()
+
+    sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
+    original_urlopen = _urlreq.urlopen
+    _urlreq.urlopen = fake_urlopen
+    try:
+        agent.run_single_shot_patch("test", sandbox, model="gpt-oss:20b", allowed_paths=frozenset({"a.py"}),
+                                     request_mode="native_tools")
+    finally:
+        _urlreq.urlopen = original_urlopen
+
+    check("native_tools hits /api/chat, not /api/generate",
+          captured.get("url", "").endswith("/api/chat"), captured.get("url"))
+    data = captured.get("data", {})
+    check("native_tools sends a real messages list", isinstance(data.get("messages"), list) and bool(data["messages"]), data)
+    tools = data.get("tools") or []
+    check("native_tools sends exactly one tool definition matching SINGLE_SHOT_PATCH_TOOL_DEFINITION",
+          tools == [agent.SINGLE_SHOT_PATCH_TOOL_DEFINITION], tools)
+    check("native_tools never sends the old format-constrained field", "format" not in data, data)
+    check("native_tools still carries the bounded num_ctx", data.get("options", {}).get("num_ctx") == agent.OLLAMA_NUM_CTX, data)
+
+
+def test_single_shot_native_tools_applies_a_real_tool_call_response() -> None:
+    """When the model calls submit_patch with a valid {"files": [...]}
+    argument object, the patch is parsed straight from tool_calls and
+    applied -- no text parsing needed."""
+    import urllib.request as _urlreq
+
+    def fake_urlopen(req, timeout=None):
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"message": {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "call_1", "function": {"name": "submit_patch", "arguments": {
+                        "files": [{"path": "a.py", "op": "patch", "old_string": "X = 1", "new_string": "X = 2"}]
+                    }}}
+                ]}}).encode()
+        return _FakeResponse()
+
+    sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
+    original_urlopen = _urlreq.urlopen
+    _urlreq.urlopen = fake_urlopen
+    try:
+        run = agent.run_single_shot_patch("test", sandbox, model="gpt-oss:20b", allowed_paths=frozenset({"a.py"}),
+                                           request_mode="native_tools")
+    finally:
+        _urlreq.urlopen = original_urlopen
+
+    check("a real tool_call response reaches final_action=finish", run.final_action == "finish", run.summary_or_reason)
+    check("the patch from the tool call was actually applied", (sandbox / "a.py").read_text() == "X = 2\n", (sandbox / "a.py").read_text())
+
+
+def test_single_shot_native_tools_falls_back_to_content_when_no_tool_call() -> None:
+    """Real, observed gpt-oss:20b behavior: given both a tool definition
+    AND a "respond with JSON" instruction, the model sometimes answers in
+    plain `content` text (a valid {"files": [...]} JSON object) instead of
+    calling submit_patch. This must not be treated as a failure -- the
+    content is parsed as a fallback and applied exactly as a real tool
+    call would be."""
+    import urllib.request as _urlreq
+
+    def fake_urlopen(req, timeout=None):
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"message": {
+                    "role": "assistant",
+                    "content": json.dumps({"files": [{"path": "a.py", "op": "patch", "old_string": "X = 1", "new_string": "X = 3"}]}),
+                    "tool_calls": [],
+                }}).encode()
+        return _FakeResponse()
+
+    sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
+    original_urlopen = _urlreq.urlopen
+    _urlreq.urlopen = fake_urlopen
+    try:
+        run = agent.run_single_shot_patch("test", sandbox, model="gpt-oss:20b", allowed_paths=frozenset({"a.py"}),
+                                           request_mode="native_tools")
+    finally:
+        _urlreq.urlopen = original_urlopen
+
+    check("a content-only (no tool_call) response still reaches final_action=finish",
+          run.final_action == "finish", run.summary_or_reason)
+    check("the patch parsed from content text was actually applied",
+          (sandbox / "a.py").read_text() == "X = 3\n", (sandbox / "a.py").read_text())
+
+
+def test_single_shot_native_tools_fails_safely_with_no_tool_call_and_unparseable_content() -> None:
+    """If the model neither calls submit_patch nor produces parseable JSON
+    content, this must fail safely (final_action="error") -- never crash,
+    never silently no-op as success."""
+    import urllib.request as _urlreq
+
+    def fake_urlopen(req, timeout=None):
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"message": {"role": "assistant", "content": "sure, I'll get right on that!", "tool_calls": []}}).encode()
+        return _FakeResponse()
+
+    sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
+    original_urlopen = _urlreq.urlopen
+    _urlreq.urlopen = fake_urlopen
+    try:
+        run = agent.run_single_shot_patch("test", sandbox, model="gpt-oss:20b", allowed_paths=frozenset({"a.py"}),
+                                           request_mode="native_tools")
+    finally:
+        _urlreq.urlopen = original_urlopen
+
+    check("no tool call + unparseable content fails safely with final_action=error",
+          run.final_action == "error", run.summary_or_reason)
+    check("the sandbox file is untouched on failure", (sandbox / "a.py").read_text() == "X = 1\n", (sandbox / "a.py").read_text())
+
+
+def test_single_shot_default_request_mode_is_still_format_constrained_and_unaffected() -> None:
+    """The default request_mode (no argument given) is unchanged: it still
+    hits /api/generate with the format-constrained schema, never /api/chat
+    -- the native_tools profile is strictly additive/opt-in."""
+    import urllib.request as _urlreq
+
+    captured: dict = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"response": '{"files": []}'}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["data"] = json.loads(req.data.decode())
+        return _FakeResponse()
+
+    sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
+    original_urlopen = _urlreq.urlopen
+    _urlreq.urlopen = fake_urlopen
+    try:
+        agent.run_single_shot_patch("test", sandbox, model="qwen3-coder:30b", allowed_paths=frozenset({"a.py"}))
+    finally:
+        _urlreq.urlopen = original_urlopen
+
+    check("default request_mode still hits /api/generate, not /api/chat",
+          captured.get("url", "").endswith("/api/generate"), captured.get("url"))
+    check("default request_mode still sends the format-constrained schema",
+          captured.get("data", {}).get("format") == agent.SINGLE_SHOT_PATCH_JSON_SCHEMA, captured.get("data"))
+    check("default request_mode never sends a tools array",
+          "tools" not in captured.get("data", {}), captured.get("data"))
+
+
 # ---- integration tests (live Ollama call — genuinely proven, not mocked) ---
 
 def test_full_target_loop_live() -> None:
@@ -2502,6 +2707,11 @@ if __name__ == "__main__":
     test_single_shot_path_also_sends_the_bounded_num_ctx()
     test_single_shot_sends_the_correct_files_schema_not_the_tool_call_schema()
     test_agent_loop_path_still_sends_the_original_tool_call_schema_unaffected()
+    test_single_shot_native_tools_sends_chat_endpoint_with_tool_definition()
+    test_single_shot_native_tools_applies_a_real_tool_call_response()
+    test_single_shot_native_tools_falls_back_to_content_when_no_tool_call()
+    test_single_shot_native_tools_fails_safely_with_no_tool_call_and_unparseable_content()
+    test_single_shot_default_request_mode_is_still_format_constrained_and_unaffected()
     test_context_staging_excludes_secret_paths_by_default()
     test_context_staging_excludes_manual_candidates_and_backups_by_default()
     test_decomposed_source_paths_are_staged_and_excluded_ones_are_recorded_not_copied()

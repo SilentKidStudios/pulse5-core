@@ -516,6 +516,7 @@ def submit_job_single_shot(
     source_paths: list[str] | None = None,
     allowed_paths: frozenset[str] | None = None,
     max_files: int = MAX_SINGLE_SHOT_FILES,
+    request_mode: str = "format_constrained",
 ) -> JobResult:
     """SINGLE_SHOT_PATCH_STRATEGY_V1 (Founder-authorized, 2026-09-02) — a
     fundamentally different, EXPLICITLY OPT-IN execution strategy. NEVER
@@ -611,7 +612,7 @@ def submit_job_single_shot(
 
         run = run_single_shot_patch(
             task, workdir, model=model, provider="ollama", timeout_s=timeout_s,
-            allowed_paths=allowed_paths, max_files=max_files,
+            allowed_paths=allowed_paths, max_files=max_files, request_mode=request_mode,
         )
 
         after = _snapshot(workdir)

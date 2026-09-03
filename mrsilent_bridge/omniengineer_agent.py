@@ -1164,6 +1164,73 @@ SINGLE_SHOT_PATCH_JSON_SCHEMA = {
     "required": ["files"],
 }
 
+# NATIVE_TOOL_EXECUTION_PROFILE (Founder-authorized, 2026-09-02): the
+# format-constrained decoding profile above (_call_ollama's `format` field
+# on /api/generate) is empirically incompatible with gpt-oss:20b's Harmony
+# behavior on this Ollama installation -- confirmed via three independent
+# reproductions (old tool-call schema, new files schema, and the real
+# governed multi-turn agent-loop path), all producing an EMPTY response
+# despite eval_count>0 tokens generated. Ollama's OTHER, NATIVE tool-calling
+# transport (POST /api/chat with a real `tools` array, receiving back a
+# parsed `message.tool_calls[]`) is a fundamentally different mechanism --
+# not format-constrained completion, the model's own trained function-
+# calling behavior -- and is empirically PROVEN compatible: a real live
+# call returned a correct, fully-parsed tool_calls[0].function.arguments
+# matching the requested schema on the first attempt. This is model-aware,
+# not a blind global switch: existing callers (run_agent_loop(),
+# run_single_shot_patch()'s default) are completely untouched; this is an
+# explicitly opt-in alternate profile a caller selects per model.
+SINGLE_SHOT_PATCH_TOOL_NAME = "submit_patch"
+
+SINGLE_SHOT_PATCH_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": SINGLE_SHOT_PATCH_TOOL_NAME,
+        "description": "Submit the complete, bounded patch for this task -- call this exactly once with every file change needed.",
+        "parameters": SINGLE_SHOT_PATCH_JSON_SCHEMA,
+    },
+}
+
+
+def _call_ollama_chat_native_tool(
+    prompt: str, *, model: str, timeout_s: int, tool_definition: dict, tool_name: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """NATIVE_TOOL_EXECUTION_PROFILE: calls Ollama's /api/chat with a real
+    `tools` array (the model's own native function-calling behavior, NOT
+    format-constrained completion). Returns (tool_call_args, content_text):
+    `tool_call_args` is the first matching tool call's already-parsed
+    `arguments` dict, or None if the model never called `tool_name`;
+    `content_text` is the plain-text `content` field regardless (real,
+    observed behavior: a model given both a clear "respond with JSON"
+    instruction AND a matching tool sometimes answers in content instead
+    of calling the tool, even though the JSON it produces is otherwise
+    perfectly valid -- callers should treat content_text as a fallback
+    parse target, not silently discard a working answer just because the
+    model expressed it as text rather than a tool call). Raises the same
+    exception types _call_ollama() does (urllib.error.URLError on
+    transport failure) so callers can handle both uniformly."""
+    payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "tools": [tool_definition],
+        "stream": False,
+        "options": {"num_ctx": OLLAMA_NUM_CTX},
+    }).encode()
+    req = urllib.request.Request(
+        f"{OLLAMA_BASE_URL}/api/chat", data=payload,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        body = json.loads(resp.read().decode())
+    message = body.get("message") or {}
+    tool_calls = message.get("tool_calls") or []
+    for call in tool_calls:
+        fn = call.get("function") or {}
+        if fn.get("name") == tool_name:
+            args = fn.get("arguments")
+            return (args if isinstance(args, dict) else None), str(message.get("content") or "")
+    return None, str(message.get("content") or "")
+
 
 def _parse_single_shot_patch(raw: str) -> dict[str, Any] | None:
     for candidate in (raw, _extract_balanced_json_object(raw)):
@@ -1193,6 +1260,7 @@ def run_single_shot_patch(
     timeout_s: int | None = None,
     allowed_paths: frozenset[str],
     max_files: int = MAX_SINGLE_SHOT_FILES,
+    request_mode: str = "format_constrained",
 ) -> AgentRunResult:
     """SINGLE_SHOT_PATCH_STRATEGY_V1 entry point. Exactly ONE model request;
     no iteration, no autonomous retry -- callers that want a second attempt
@@ -1200,7 +1268,18 @@ def run_single_shot_patch(
     implicit. `allowed_paths` is REQUIRED: a stricter, single-shot-only
     allowlist beyond what sandbox staging itself already enforces -- a
     patch entry naming any other path is refused, even if that path is
-    otherwise present and staged in the sandbox."""
+    otherwise present and staged in the sandbox.
+
+    `request_mode` (Founder-authorized, 2026-09-02): "format_constrained"
+    (the default, unchanged since this strategy's original commit) sends
+    one /api/generate request with Ollama's structured-output `format`
+    grammar constraint -- proven reliable for qwen-family models, but
+    empirically incompatible with gpt-oss:20b's Harmony behavior on this
+    installation. "native_tools" sends one /api/chat request with a real
+    `tools` array instead -- the model's own native function-calling
+    behavior, not grammar-constrained completion -- empirically proven
+    compatible with gpt-oss:20b. Explicitly opt-in per call; every existing
+    caller (and this function's own default) is completely unaffected."""
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
     before_snapshot = _snapshot(sandbox)
@@ -1216,20 +1295,53 @@ def run_single_shot_patch(
             prompt += f"\n\nCURRENT CONTENT of {rel}:\n{p.read_text(errors='replace')[:MAX_FILE_SIZE_CHARS]}\n"
     prompt += "\nRespond with your one complete patch now.\n"
 
-    try:
-        raw = _call_model_backend(prompt, model=model, provider=provider, timeout_s=call_timeout,
-                                   response_schema=SINGLE_SHOT_PATCH_JSON_SCHEMA)
-    except urllib.error.URLError as e:
-        return _finish(task, sandbox, model, provider, "model_unavailable", f"{provider} request failed: {e}",
-                        turns, commands_executed, 1, started_at, t0)
-    except Exception as e:  # noqa: BLE001
-        return _finish(task, sandbox, model, provider, "error", f"unexpected error calling model via {provider}: {e!r}",
-                        turns, commands_executed, 1, started_at, t0)
+    if request_mode == "native_tools":
+        if provider != "ollama":
+            return _finish(task, sandbox, model, provider, "error",
+                            f"request_mode='native_tools' is only supported for provider='ollama', got {provider!r}",
+                            turns, commands_executed, 1, started_at, t0)
+        try:
+            tool_args, content_text = _call_ollama_chat_native_tool(
+                prompt, model=model, timeout_s=call_timeout,
+                tool_definition=SINGLE_SHOT_PATCH_TOOL_DEFINITION, tool_name=SINGLE_SHOT_PATCH_TOOL_NAME,
+            )
+        except urllib.error.URLError as e:
+            return _finish(task, sandbox, model, provider, "model_unavailable", f"{provider} request failed: {e}",
+                            turns, commands_executed, 1, started_at, t0)
+        except Exception as e:  # noqa: BLE001
+            return _finish(task, sandbox, model, provider, "error",
+                            f"unexpected error calling model via {provider} (native_tools): {e!r}",
+                            turns, commands_executed, 1, started_at, t0)
+        # Prefer the real tool call; fall back to parsing `content` as text
+        # only if the tool was never called -- a real, observed gpt-oss
+        # behavior: a valid {"files": [...]} answer expressed as plain text
+        # instead of a submit_patch call. Never silently discard a working
+        # answer just because it arrived as content rather than a tool_call.
+        patch = tool_args if tool_args is not None else _parse_single_shot_patch(content_text)
+        if patch is None:
+            turns.append(TurnRecord(1, "single_shot_patch", {}, "",
+                                     f"malformed: model never called the {SINGLE_SHOT_PATCH_TOOL_NAME!r} tool, and its text content (if any) was not a parseable {{\"files\": [...]}} JSON object", False))
+            return _finish(task, sandbox, model, provider, "error",
+                            f"model did not produce a valid native tool call for {SINGLE_SHOT_PATCH_TOOL_NAME!r}, nor parseable JSON content",
+                            turns, commands_executed, 1, started_at, t0)
+    elif request_mode == "format_constrained":
+        try:
+            raw = _call_model_backend(prompt, model=model, provider=provider, timeout_s=call_timeout,
+                                       response_schema=SINGLE_SHOT_PATCH_JSON_SCHEMA)
+        except urllib.error.URLError as e:
+            return _finish(task, sandbox, model, provider, "model_unavailable", f"{provider} request failed: {e}",
+                            turns, commands_executed, 1, started_at, t0)
+        except Exception as e:  # noqa: BLE001
+            return _finish(task, sandbox, model, provider, "error", f"unexpected error calling model via {provider}: {e!r}",
+                            turns, commands_executed, 1, started_at, t0)
 
-    patch = _parse_single_shot_patch(raw)
-    if patch is None:
-        turns.append(TurnRecord(1, "single_shot_patch", {}, "", "malformed: response was not a parseable {\"files\": [...]} JSON object", False))
-        return _finish(task, sandbox, model, provider, "error", "model returned a malformed/unparseable single-shot patch response",
+        patch = _parse_single_shot_patch(raw)
+        if patch is None:
+            turns.append(TurnRecord(1, "single_shot_patch", {}, "", "malformed: response was not a parseable {\"files\": [...]} JSON object", False))
+            return _finish(task, sandbox, model, provider, "error", "model returned a malformed/unparseable single-shot patch response",
+                            turns, commands_executed, 1, started_at, t0)
+    else:
+        return _finish(task, sandbox, model, provider, "error", f"unknown request_mode {request_mode!r}",
                         turns, commands_executed, 1, started_at, t0)
 
     files = patch.get("files", [])
