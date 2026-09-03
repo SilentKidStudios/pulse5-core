@@ -362,6 +362,27 @@ def retry_ready_at(failed_at: str, attempt: int) -> str:
     return new_dt.isoformat()
 
 
+def should_stop_for_gate_decision(risk_class: str | None, approval_state: str | None, authority_state: str | None) -> bool:
+    """Return True if a gate decision should stop retrying.
+    This implements the rule that stops automatic retrying when authority
+    or resource decisions forbid it.
+
+    Stop retrying (return True) when any of the following hold:
+    - authority_state == "denied"
+    - approval_state == "rejected"
+    - risk_class == "founder_gated" and approval_state != "granted"
+
+    Return False otherwise.
+    """
+    if authority_state == "denied":
+        return True
+    if approval_state == "rejected":
+        return True
+    if risk_class == "founder_gated" and approval_state != "granted":
+        return True
+    return False
+
+
 def classify(record: LedgerRecord) -> RecoveryPolicy:
     """Pure, read-only recovery-policy decision — never executes anything.
     See module docstring for the full reasoning."""
