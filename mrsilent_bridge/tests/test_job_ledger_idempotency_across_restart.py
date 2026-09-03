@@ -1,5 +1,6 @@
 import uuid
 import job_ledger
+from _test_isolation import isolated_test_state  # root-cause test-isolation guarantee, see tests/_test_isolation.py
 
 FAILURES = []
 
@@ -27,6 +28,7 @@ def test_stable_idempotency_key_survives_a_simulated_restart():
         check("recomputed fingerprint matches record fingerprint", recomputed_fp == record.task_fingerprint)
 
 if __name__ == "__main__":
-    test_task_fingerprint_is_stable_and_deterministic_across_calls()
-    test_stable_idempotency_key_survives_a_simulated_restart()
+    with isolated_test_state():
+        test_task_fingerprint_is_stable_and_deterministic_across_calls()
+        test_stable_idempotency_key_survives_a_simulated_restart()
     print("FAILURES=" + str(FAILURES))

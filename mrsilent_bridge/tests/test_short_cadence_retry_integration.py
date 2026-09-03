@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import job_ledger
 from evolution import advance
 from evolution import proposal as proposal_mod
+from _test_isolation import isolated_test_state  # root-cause test-isolation guarantee, see tests/_test_isolation.py
 
 FAILURES: list[str] = []
 
@@ -224,15 +225,16 @@ def test_I_fine_grained_subhourly_checks_track_real_elapsed_time() -> None:
 
 
 if __name__ == "__main__":
-    test_A_transient_not_ready_waits_no_dispatch()
-    test_B_transient_ready_allows_exactly_one_continuation()
-    test_C_non_transient_excluded_from_new_path()
-    test_D_gate_stop_is_detected_and_surfaced()
-    test_E_active_work_branch_unaffected()
-    test_F_restart_before_ready_no_duplicate()
-    test_G_restart_after_ready_allows_one_continuation()
-    test_H_repeated_calls_never_grow_lineage_on_their_own()
-    test_I_fine_grained_subhourly_checks_track_real_elapsed_time()
+    with isolated_test_state():
+        test_A_transient_not_ready_waits_no_dispatch()
+        test_B_transient_ready_allows_exactly_one_continuation()
+        test_C_non_transient_excluded_from_new_path()
+        test_D_gate_stop_is_detected_and_surfaced()
+        test_E_active_work_branch_unaffected()
+        test_F_restart_before_ready_no_duplicate()
+        test_G_restart_after_ready_allows_one_continuation()
+        test_H_repeated_calls_never_grow_lineage_on_their_own()
+        test_I_fine_grained_subhourly_checks_track_real_elapsed_time()
     if FAILURES:
         print(f"\n{len(FAILURES)} failing test(s): {FAILURES}")
     else:

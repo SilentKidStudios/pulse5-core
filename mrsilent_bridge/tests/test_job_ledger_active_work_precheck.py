@@ -1,5 +1,6 @@
 import uuid
 import job_ledger
+from _test_isolation import isolated_test_state  # root-cause test-isolation guarantee, see tests/_test_isolation.py
 
 # simple test helper
 FAILURES = []
@@ -59,7 +60,8 @@ def test_an_unrecognized_state_value_still_counts_as_active_fail_closed():
 
 
 if __name__ == "__main__":
-    test_active_work_precheck_finds_a_still_active_job_by_fingerprint()
-    test_a_terminal_completed_job_does_not_block_a_new_legitimate_request()
-    test_an_unrecognized_state_value_still_counts_as_active_fail_closed()
+    with isolated_test_state():
+        test_active_work_precheck_finds_a_still_active_job_by_fingerprint()
+        test_a_terminal_completed_job_does_not_block_a_new_legitimate_request()
+        test_an_unrecognized_state_value_still_counts_as_active_fail_closed()
     print("FAILURES=" + str(FAILURES))
