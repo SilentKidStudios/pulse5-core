@@ -200,9 +200,21 @@ def _safe_path(sandbox: Path, rel: str) -> Path | None:
     return p
 
 
-def _call_ollama(prompt: str, *, model: str, timeout_s: int) -> str:
+def _call_ollama(prompt: str, *, model: str, timeout_s: int, response_schema: dict | None = None) -> str:
+    """SINGLE_SHOT_SCHEMA_REPAIR (Founder-authorized, 2026-09-02):
+    `response_schema` lets a caller request Ollama's structured-output
+    grammar constrain the response to something OTHER than the default
+    tool-call shape (_TOOL_CALL_JSON_SCHEMA) -- e.g. run_single_shot_patch()
+    passing SINGLE_SHOT_PATCH_JSON_SCHEMA for its {"files": [...]} response.
+    Defaults to None, which resolves to _TOOL_CALL_JSON_SCHEMA exactly as
+    before this parameter existed -- zero behavior change for
+    run_agent_loop() or any other unchanged caller. Model/provider-agnostic:
+    this is a plain per-request JSON Schema, not a qwen- or gpt-oss-specific
+    option, so it applies identically regardless of which installed model
+    is named."""
     payload = json.dumps({
-        "model": model, "prompt": prompt, "stream": False, "format": _TOOL_CALL_JSON_SCHEMA,
+        "model": model, "prompt": prompt, "stream": False,
+        "format": response_schema if response_schema is not None else _TOOL_CALL_JSON_SCHEMA,
         "options": {"num_ctx": OLLAMA_NUM_CTX},
     }).encode()
     req = urllib.request.Request(
@@ -613,6 +625,7 @@ def _ollama_contract_adapter(
         request.prompt,
         model=request.model,
         timeout_s=request.timeout_s,
+        response_schema=request.metadata.get("response_schema"),
     )
 
     return backend_contract.BackendResponse(
@@ -683,19 +696,27 @@ def _call_model_backend(
     model: str,
     provider: str,
     timeout_s: int,
+    response_schema: dict | None = None,
 ) -> str:
-    """Invoke any registered model backend through one stable Omni seam."""
+    """Invoke any registered model backend through one stable Omni seam.
+    `response_schema`, if given, is threaded through as request metadata
+    so a provider-specific adapter (e.g. _ollama_contract_adapter) MAY use
+    it to constrain structured output to something other than the default
+    tool-call shape -- optional and additive, existing callers/adapters
+    that never pass or read it are completely unaffected."""
 
     _ensure_builtin_backend_contracts()
+
+    metadata: dict[str, Any] = {"caller": "omniengineer_agent"}
+    if response_schema is not None:
+        metadata["response_schema"] = response_schema
 
     response = backend_contract.invoke_backend(
         provider,
         prompt=prompt,
         model=model,
         timeout_s=timeout_s,
-        metadata={
-            "caller": "omniengineer_agent",
-        },
+        metadata=metadata,
     )
 
     return response.text
@@ -1112,6 +1133,37 @@ Rules:
 - Generate the complete, correct patch in this single response -- there is no follow-up turn to fix mistakes.
 """
 
+# SINGLE_SHOT_SCHEMA_REPAIR (Founder-authorized, 2026-09-02): the actual
+# structured-output grammar Ollama constrains the response to for a
+# single-shot request -- previously this call site had no way to request
+# anything other than _TOOL_CALL_JSON_SCHEMA (the {thought,tool,args}
+# shape), so every single-shot response was grammar-forced into the WRONG
+# shape regardless of the prompt above, and could never validly parse as
+# {"files": [...]}. old_string/new_string/content are deliberately NOT in
+# "required" -- a "create" entry only needs content, a "patch" entry only
+# needs old_string/new_string, and over-constraining required fields risks
+# rejecting an otherwise-valid patch during grammar-constrained decoding.
+SINGLE_SHOT_PATCH_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "files": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "op": {"type": "string", "enum": ["patch", "create"]},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "op"],
+            },
+        },
+    },
+    "required": ["files"],
+}
+
 
 def _parse_single_shot_patch(raw: str) -> dict[str, Any] | None:
     for candidate in (raw, _extract_balanced_json_object(raw)):
@@ -1165,7 +1217,8 @@ def run_single_shot_patch(
     prompt += "\nRespond with your one complete patch now.\n"
 
     try:
-        raw = _call_model_backend(prompt, model=model, provider=provider, timeout_s=call_timeout)
+        raw = _call_model_backend(prompt, model=model, provider=provider, timeout_s=call_timeout,
+                                   response_schema=SINGLE_SHOT_PATCH_JSON_SCHEMA)
     except urllib.error.URLError as e:
         return _finish(task, sandbox, model, provider, "model_unavailable", f"{provider} request failed: {e}",
                         turns, commands_executed, 1, started_at, t0)

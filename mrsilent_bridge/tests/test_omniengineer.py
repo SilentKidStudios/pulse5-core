@@ -429,7 +429,7 @@ def test_allowed_tools_structurally_refuses_a_disallowed_tool_call() -> None:
             '{"thought": "cannot write, done", "tool": "finish", "args": {"summary": "read-only this run"}}',
         ])
         original_call = agent._call_ollama
-        agent._call_ollama = lambda prompt, *, model, timeout_s: next(calls)
+        agent._call_ollama = lambda prompt, *, model, timeout_s, response_schema=None: next(calls)
         try:
             result = agent.run_agent_loop(
                 "synthetic read-only test task", sandbox,
@@ -459,7 +459,7 @@ def test_allowed_tools_none_keeps_full_backward_compatible_access() -> None:
             '{"thought": "done", "tool": "finish", "args": {"summary": "wrote y.py"}}',
         ])
         original_call = agent._call_ollama
-        agent._call_ollama = lambda prompt, *, model, timeout_s: next(calls)
+        agent._call_ollama = lambda prompt, *, model, timeout_s, response_schema=None: next(calls)
         try:
             result = agent.run_agent_loop("synthetic unrestricted test task", sandbox, allowed_tools=None)
         finally:
@@ -1084,7 +1084,7 @@ def test_h4_builtin_backend_behavioral_parity() -> None:
     ollama_capture = {}
     provider_b_capture = {}
 
-    def fake_ollama(prompt, *, model, timeout_s):
+    def fake_ollama(prompt, *, model, timeout_s, response_schema=None):
         ollama_capture.update(
             prompt=prompt,
             model=model,
@@ -1360,7 +1360,7 @@ def test_single_shot_rejects_a_path_outside_the_allowed_paths_allowlist() -> Non
     path with no traversal/protected-marker issue."""
     sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
     original = agent._call_model_backend
-    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: json.dumps({
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s, response_schema=None: json.dumps({
         "files": [{"path": "b.py", "op": "create", "content": "Y = 2\n"}]
     })
     try:
@@ -1377,7 +1377,7 @@ def test_single_shot_rejects_path_traversal() -> None:
     run_agent_loop() itself relies on."""
     sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
     original = agent._call_model_backend
-    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: json.dumps({
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s, response_schema=None: json.dumps({
         "files": [{"path": "../escape.py", "op": "create", "content": "Y = 2\n"}]
     })
     try:
@@ -1392,7 +1392,7 @@ def test_single_shot_rejects_a_protected_secret_path() -> None:
     _safe_path()'s GATED_PATH_MARKERS check."""
     sandbox = _single_shot_sandbox({})
     original = agent._call_model_backend
-    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: json.dumps({
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s, response_schema=None: json.dumps({
         "files": [{"path": "secrets/key.py", "op": "create", "content": "X = 1\n"}]
     })
     try:
@@ -1408,7 +1408,7 @@ def test_single_shot_rejects_malformed_model_output_safely() -> None:
     error final_action, nothing applied."""
     sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
     original = agent._call_model_backend
-    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: "this is not JSON at all {{{"
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s, response_schema=None: "this is not JSON at all {{{"
     try:
         run = agent.run_single_shot_patch("test", sandbox, allowed_paths=frozenset({"a.py"}))
     finally:
@@ -1423,7 +1423,7 @@ def test_single_shot_rejects_out_of_scope_patch_exceeding_max_files() -> None:
     sandbox = _single_shot_sandbox({})
     allowed = frozenset({f"f{i}.py" for i in range(4)})
     original = agent._call_model_backend
-    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: json.dumps({
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s, response_schema=None: json.dumps({
         "files": [{"path": f"f{i}.py", "op": "create", "content": "X = 1\n"} for i in range(4)]
     })
     try:
@@ -1443,7 +1443,7 @@ def test_single_shot_validation_failure_does_not_promote() -> None:
     through the exact same governed validation gate every other execution
     path uses."""
     original_call = agent._call_model_backend
-    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s: json.dumps({
+    agent._call_model_backend = lambda prompt, *, model, provider, timeout_s, response_schema=None: json.dumps({
         "files": [{"path": "broken.py", "op": "create", "content": "def broken(:\n"}]
     })
     try:
@@ -1519,6 +1519,95 @@ def test_single_shot_path_also_sends_the_bounded_num_ctx() -> None:
     check("the single-shot path's real Ollama request also carries options.num_ctx",
           captured.get("data", {}).get("options", {}).get("num_ctx") == agent.OLLAMA_NUM_CTX,
           captured.get("data"))
+
+
+# ---- SINGLE_SHOT_SCHEMA_REPAIR (Founder-authorized, 2026-09-02) ------------
+#
+# Root cause: _call_ollama()/_call_model_backend()/_ollama_contract_adapter()
+# had no parameter to accept a caller-supplied JSON schema -- the Ollama
+# `format` field was a hardcoded constant (_TOOL_CALL_JSON_SCHEMA, the
+# {thought,tool,args} tool-call shape), sent unconditionally regardless of
+# caller. run_single_shot_patch()'s response parser expects a completely
+# different {"files": [...]} shape, so Ollama's structured-output grammar
+# was forcing every single-shot response into the WRONG shape -- this
+# explains both the qwen3-coder:30b and gpt-oss:20b single-shot failures
+# equally; neither was a valid model-capability test. Fixed by threading an
+# optional response_schema through the same seam every call already uses,
+# defaulting to the original tool-call schema when not given -- zero
+# behavior change for run_agent_loop() or any other unchanged caller.
+
+def test_single_shot_sends_the_correct_files_schema_not_the_tool_call_schema() -> None:
+    """The corrected single-shot request is structurally valid: it sends
+    SINGLE_SHOT_PATCH_JSON_SCHEMA (required=['files']), never the old
+    tool-call schema (required=['thought','tool','args']) that previously
+    made every single-shot response unparseable regardless of model."""
+    import urllib.request as _urlreq
+
+    captured: dict = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"response": '{"files": []}'}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        captured["data"] = json.loads(req.data.decode())
+        return _FakeResponse()
+
+    sandbox = _single_shot_sandbox({"a.py": "X = 1\n"})
+    original_urlopen = _urlreq.urlopen
+    _urlreq.urlopen = fake_urlopen
+    try:
+        agent.run_single_shot_patch("test", sandbox, model="gpt-oss:20b", allowed_paths=frozenset({"a.py"}))
+    finally:
+        _urlreq.urlopen = original_urlopen
+
+    sent_format = captured.get("data", {}).get("format")
+    check("single-shot sends SINGLE_SHOT_PATCH_JSON_SCHEMA, not the tool-call schema",
+          sent_format == agent.SINGLE_SHOT_PATCH_JSON_SCHEMA, sent_format)
+    check("the previously-sent malformed (tool-call) schema is no longer what single-shot sends",
+          sent_format != agent._TOOL_CALL_JSON_SCHEMA, sent_format)
+    check("this reproduces correctly for gpt-oss:20b specifically, not just qwen",
+          captured.get("data", {}).get("model") == "gpt-oss:20b", captured.get("data", {}).get("model"))
+
+
+def test_agent_loop_path_still_sends_the_original_tool_call_schema_unaffected() -> None:
+    """The qwen/agent-loop request path remains valid and completely
+    unaffected by the single-shot schema repair -- run_agent_loop()'s own
+    _call_ollama() calls (no response_schema argument) still default to
+    _TOOL_CALL_JSON_SCHEMA exactly as before this fix existed."""
+    import urllib.request as _urlreq
+
+    captured: dict = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"response": '{"thought":"x","tool":"finish","args":{"summary":"ok"}}'}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        captured["data"] = json.loads(req.data.decode())
+        return _FakeResponse()
+
+    original_urlopen = _urlreq.urlopen
+    _urlreq.urlopen = fake_urlopen
+    try:
+        agent._call_ollama("plain agent-loop style prompt", model="qwen3-coder:30b", timeout_s=5)
+    finally:
+        _urlreq.urlopen = original_urlopen
+
+    check("the agent-loop call path still sends the original tool-call schema, unaffected by the repair",
+          captured.get("data", {}).get("format") == agent._TOOL_CALL_JSON_SCHEMA, captured.get("data"))
 
 
 # ---- integration tests (live Ollama call — genuinely proven, not mocked) ---
@@ -2411,6 +2500,8 @@ if __name__ == "__main__":
     test_single_shot_paid_resource_gate_preserved()
     test_single_shot_founder_promotion_gate_preserved()
     test_single_shot_path_also_sends_the_bounded_num_ctx()
+    test_single_shot_sends_the_correct_files_schema_not_the_tool_call_schema()
+    test_agent_loop_path_still_sends_the_original_tool_call_schema_unaffected()
     test_context_staging_excludes_secret_paths_by_default()
     test_context_staging_excludes_manual_candidates_and_backups_by_default()
     test_decomposed_source_paths_are_staged_and_excluded_ones_are_recorded_not_copied()
