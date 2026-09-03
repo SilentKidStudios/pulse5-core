@@ -341,9 +341,35 @@ def is_stale(record: LedgerRecord, *, stale_after_s: int = STALE_AFTER_S) -> boo
 
 def is_transient_failure(error_class: str) -> bool:
     """Return True only for a known set of transient failure classes.
-    Known classes: timeout, unavailable, connection_error, rate_limited.
+    Known classes: timeout, unavailable, connection_error, rate_limited
+    (raw provider-level classes), plus the canonical FAILURE_TAXONOMY-
+    equivalent labels MODEL_TIMEOUT, MODEL_UNAVAILABLE, PROVIDER_TIMEOUT,
+    PROVIDER_UNAVAILABLE, PROVIDER_FAILURE (see classify_ledger_failure_
+    transience(), which reconstructs these from a durable LedgerRecord).
     All other values, including empty or None, return False (fail-closed)."""
-    return error_class in {"timeout", "unavailable", "connection_error", "rate_limited"}
+    return error_class in {"timeout", "unavailable", "connection_error", "rate_limited", "MODEL_TIMEOUT", "MODEL_UNAVAILABLE", "PROVIDER_TIMEOUT", "PROVIDER_UNAVAILABLE", "PROVIDER_FAILURE"}
+
+
+def classify_ledger_failure_transience(error_class: str | None, terminal_result: str | None) -> str:
+    """Reconstructs a FAILURE_TAXONOMY-equivalent label (see
+    local_model_health.classify_failure()) from the two fields a
+    LedgerRecord already durably persists, since that richer classifier's
+    own output is computed at job-completion time but never written to the
+    durable ledger. Always fails closed to "AMBIGUOUS" for any
+    unrecognized or missing combination -- never guesses."""
+    if error_class == "infra" and terminal_result == "timeout":
+        return "MODEL_TIMEOUT"
+    if error_class == "infra" and terminal_result in ("model_unavailable", "local_model_unavailable", "claude_unavailable"):
+        return "MODEL_UNAVAILABLE"
+    if error_class == "infra" and terminal_result in ("error", "iteration_ceiling_reached"):
+        return "AMBIGUOUS"
+    if error_class == "model_escalate":
+        return "TASK_FAILURE"
+    if error_class in ("validation", "validator_disagreement"):
+        return "MODEL_FAILURE"
+    if error_class == "authority":
+        return "AUTHORITY_BLOCK"
+    return "AMBIGUOUS"
 
 
 def retry_ready_at(failed_at: str, attempt: int) -> str:

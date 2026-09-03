@@ -378,7 +378,19 @@ def _resolve_prior_attempt(p: proposal_mod.Proposal, *, requested_by: str) -> tu
         return None, f"prior job {last_job_id} is stale but not resumable ({reason}); will try a fresh attempt if budget remains", False
 
     # "failure" or "unknown"
-    return None, f"prior job {last_job_id} ended in state={status!r}; will try a fresh attempt if budget remains", False
+    if record is not None and job_ledger.should_stop_for_gate_decision(record.risk_class, record.approval_state, record.authority_state):
+        return None, f"prior job {last_job_id} stopped by gate decision", False
+    label = job_ledger.classify_ledger_failure_transience(record.error_class if record is not None else None, record.terminal_result if record is not None else None)
+    if not job_ledger.is_transient_failure(label):
+        return None, f"prior job {last_job_id} failed non-transiently (label={label})", False
+    if not p.implementation_job_ids or p.implementation_job_ids[-1] != last_job_id:
+        return None, f"prior job {last_job_id} could not be reconciled to proposal lineage -- failing closed", False
+    attempt = len(p.implementation_job_ids)
+    ready_at = job_ledger.retry_ready_at(record.updated_at, attempt)
+    now = datetime.now(timezone.utc).isoformat()
+    if not job_ledger.is_retry_ready(ready_at, now):
+        return None, f"prior transient failure (label={label}) not yet retry-ready (ready_at={ready_at})", True
+    return None, f"prior transient failure (label={label}) is retry-ready -- proceeding to a fresh attempt", False
 
 
 # ---- engine runners -----------------------------------------------------
