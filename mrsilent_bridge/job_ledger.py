@@ -339,6 +339,29 @@ def is_stale(record: LedgerRecord, *, stale_after_s: int = STALE_AFTER_S) -> boo
     return (datetime.now(timezone.utc) - hb).total_seconds() > stale_after_s
 
 
+def is_transient_failure(error_class: str) -> bool:
+    """Return True only for a known set of transient failure classes.
+    Known classes: timeout, unavailable, connection_error, rate_limited.
+    All other values, including empty or None, return False (fail-closed)."""
+    return error_class in {"timeout", "unavailable", "connection_error", "rate_limited"}
+
+
+def retry_ready_at(failed_at: str, attempt: int) -> str:
+    """Return a new ISO-8601 UTC timestamp string equal to failed_at plus a deterministic backoff
+    between 60 and 120 seconds inclusive, as a pure function of attempt.
+    """
+    from datetime import timedelta
+    try:
+        dt = datetime.fromisoformat(failed_at)
+    except Exception:
+        raise
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    backoff_seconds = 60 + ((attempt - 1) % 61)
+    new_dt = dt + timedelta(seconds=backoff_seconds)
+    return new_dt.isoformat()
+
+
 def classify(record: LedgerRecord) -> RecoveryPolicy:
     """Pure, read-only recovery-policy decision — never executes anything.
     See module docstring for the full reasoning."""
