@@ -91,6 +91,69 @@ GATED_KEYWORDS = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"\bpermission(s)? (boundary|policy)\b", r"\bauth\b.*\b(bypass|disable)\b",
 ))
 
+# NEGATION-AWARE KEYWORD SCAN (2026-09-03, real false-positive incident:
+# proposal 9266a13c's own safety disclaimer "no credential access" tripped
+# \bcredential, FOUNDER_GATING a task whose actual engineering content never
+# touched anything protected). An explicit PROHIBITION of a protected action
+# must not itself trigger the SAME protection it prohibits -- while ambiguous
+# or genuinely positive-intent mentions must keep escalating exactly as
+# before (defense-in-depth: negation-awareness only ever REMOVES a flag for
+# an occurrence that has a clear negation cue right next to it in the SAME
+# clause; it never adds a reason to skip one that doesn't).
+#
+# Scope: clause-local only (split on . ; newline) -- a negation in one
+# clause of a task description can never suppress a real positive-intent
+# match in a different clause of the same text. Per-occurrence, not
+# per-pattern: if a pattern matches multiple times, only occurrences that
+# are each individually negated are skipped; a single non-negated
+# occurrence anywhere still escalates the whole pattern exactly as before.
+#
+# Known, accepted limitation (not attempted here -- out of this bounded
+# repair's scope): nested/double negation ("never fail to protect
+# credentials") is not specially understood; such phrasing still escalates,
+# which is the conservative, safe direction for an ambiguous case.
+_NEGATION_LEAD_CUES = re.compile(
+    r"\b(no|not|never|none|without|neither|nor|avoid(?:s|ing)?|"
+    r"prohibit(?:s|ed|ing)?|forbid(?:s|den|ding)?|disallow(?:s|ed|ing)?|"
+    r"do not|does not|did not|don'?t|doesn'?t|didn'?t|won'?t|will not|"
+    r"cannot|can'?t|must not|mustn'?t|shall not|should not|shouldn'?t)\b",
+    re.IGNORECASE,
+)
+_NEGATION_TRAIL_CUES = re.compile(
+    r"\b(untouched|unchanged|unmodified|unaffected|unused|disallowed|"
+    r"forbidden|prohibited|off[- ]limits)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_BOUNDARY = re.compile(r"[.;\n]")
+
+
+def _clause_span(text: str, pos: int) -> tuple[int, int]:
+    """The [start, end) span of the clause (bounded by . ; newline, or the
+    string edges) containing offset `pos` in `text`."""
+    start = 0
+    for m in _CLAUSE_BOUNDARY.finditer(text, 0, pos):
+        start = m.end()
+    end_match = _CLAUSE_BOUNDARY.search(text, pos)
+    end = end_match.start() if end_match else len(text)
+    return start, end
+
+
+def _keyword_pattern_escalates(pattern: "re.Pattern[str]", task_description: str) -> bool:
+    """True if `pattern` has at least one occurrence in `task_description`
+    that is NOT sitting inside an explicit negative constraint in its own
+    clause -- i.e. real (or ambiguous) positive intent survives; an
+    occurrence with a clear negation cue immediately before it ('no X', 'do
+    not X') or immediately after it in the same clause ('X ... untouched')
+    is skipped instead of escalating."""
+    for m in pattern.finditer(task_description):
+        c_start, c_end = _clause_span(task_description, m.start())
+        clause = task_description[c_start:c_end]
+        rel_start, rel_end = m.start() - c_start, m.end() - c_start
+        before, after = clause[:rel_start], clause[rel_end:]
+        if not (_NEGATION_LEAD_CUES.search(before) or _NEGATION_TRAIL_CUES.search(after)):
+            return True  # a non-negated occurrence exists -- this pattern still escalates
+    return False
+
 
 @dataclass
 class PolicyDecision:
@@ -197,7 +260,7 @@ def classify(
         adapter == "local_model" and not requested_tools and not (source_paths or [])
     )
     for pattern in GATED_KEYWORDS:
-        if not skip_content_keyword_scan and pattern.search(task_description or ""):
+        if not skip_content_keyword_scan and _keyword_pattern_escalates(pattern, task_description or ""):
             risk = RiskClass.FOUNDER_GATED
             reasons.append(f"task description matched gated keyword pattern: {pattern.pattern!r}")
 
