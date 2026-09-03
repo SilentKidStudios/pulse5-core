@@ -89,10 +89,15 @@ validation-failure non-retry rules, the independent canary re-validation,
 Codex's structural unreachability — is UNCHANGED from the prior milestone;
 see the "why this is safe to run unattended" notes preserved below.
 
-Why this is safe to run unattended for low-risk proposals:
-  - eligibility requires risk_score == "low" AND status in {observed, proposed}
-    — anything else (medium/founder_gated, or already past this pipeline)
-    is left alone
+Why this is safe to run unattended for low-risk (and Founder-approved
+founder_gated) proposals:
+  - eligibility requires status in {observed, proposed} AND EITHER
+    risk_score == "low" OR (risk_score == "founder_gated" AND the canonical
+    Founder decision mechanism, evolution/founder_request.py, records an
+    exact resolved "approved" decision for THIS proposal_id — never
+    inferred, never mutates risk_score, never applies to a different
+    proposal) — anything else (medium, unapproved/denied founder_gated, or
+    already past this pipeline) is left alone
   - SAFE SANDBOX IMPLEMENT: at BOTH engines (_run_claude_code and
     _run_omni_engineer), source_paths is threaded from the proposal's OWN
     p.source_paths field (GOD_MODE_V1 FINAL GAP CLOSURE, extended to
@@ -145,6 +150,7 @@ import organ_discovery
 import studio_router
 import validation
 from authority_policy import DEFAULT_LOW_RISK_TOOLS
+from evolution import founder_request
 from evolution import prioritization
 from evolution import proposal as proposal_mod
 from job_ledger import JobState, RecoveryPolicy
@@ -240,8 +246,28 @@ def _build_task_text(p: proposal_mod.Proposal) -> str:
 
 
 def _eligible(p: proposal_mod.Proposal) -> tuple[bool, str]:
-    if p.risk_score != "low":
-        return False, f"risk_score={p.risk_score!r}, only 'low' proposals auto-advance"
+    """risk_score=='low' is unchanged: always eligible (subject to status,
+    below). risk_score=='founder_gated' is eligible ONLY when the canonical
+    Founder decision mechanism (evolution/founder_request.py, the same one
+    already used live) records an exact, resolved 'approved' decision for
+    THIS proposal_id -- approval is never inferred, never mutates
+    risk_score, and never applies to any other proposal. 'medium' or any
+    other risk_score remains ineligible, exactly as before."""
+    if p.risk_score == "low":
+        pass
+    elif p.risk_score == "founder_gated":
+        decision = founder_request.exact_proposal_decision(p.proposal_id)
+        if decision == "approved":
+            pass
+        elif decision == "denied":
+            return False, (f"risk_score='founder_gated' and the canonical Founder decision for "
+                            f"proposal_id={p.proposal_id!r} is 'denied' -- never auto-advanced")
+        else:
+            return False, (f"risk_score='founder_gated' and no exact Founder approval exists yet for "
+                            f"proposal_id={p.proposal_id!r} -- awaiting explicit Founder review")
+    else:
+        return False, (f"risk_score={p.risk_score!r}, only 'low' proposals (or a 'founder_gated' one with "
+                        f"an exact Founder approval for this proposal_id) auto-advance")
     if p.status not in (proposal_mod.ProposalStatus.OBSERVED, proposal_mod.ProposalStatus.PROPOSED):
         return False, f"status={p.status!r} is not an eligible starting point"
     return True, ""
@@ -797,7 +823,7 @@ def advance_one(proposal_id: str, *, requested_by: str = "autonomous_pipeline") 
 
     ok, reason = _eligible(p)
     stages.append(StageEvent("risk_classify", "ok" if ok else "blocked",
-                              "risk_score=low, status eligible" if ok else reason))
+                              f"risk_score={p.risk_score}, status eligible" if ok else reason))
     if not ok:
         return _finish(p, stages, None, reason, None, "n/a")
 
@@ -820,7 +846,8 @@ def advance_one(proposal_id: str, *, requested_by: str = "autonomous_pipeline") 
         # PROPOSE: formal transition out of raw OBSERVED, if not already there.
         if p.status == proposal_mod.ProposalStatus.OBSERVED:
             p = proposal_mod.advance(p.proposal_id, proposal_mod.ProposalStatus.PROPOSED,
-                                      note="auto-advanced: risk-classified low, proceeding to the implementation router")
+                                      note=f"auto-advanced: risk_score={p.risk_score} eligible "
+                                           f"(see risk_classify stage), proceeding to the implementation router")
         stages.append(StageEvent("propose", "ok", "status -> proposed"))
 
         # STABLE IMPLEMENTATION IDENTITY (#1) — check the proposal's existing
@@ -1080,7 +1107,10 @@ def _finish(p: proposal_mod.Proposal, stages: list[StageEvent], job_id: str | No
         commands_executed=[],
         test_results={"stages": [asdict(s) for s in stages], "implementation_routing": implementation_routing},
         risk_class=p.risk_score,
-        approval_state="not_required",
+        approval_state=(
+            "not_required" if p.risk_score == "low"
+            else f"founder_decision={founder_request.exact_proposal_decision(p.proposal_id)!r}"
+        ),
         final_disposition=p.status,
         lesson=blocked_reason,
     )
