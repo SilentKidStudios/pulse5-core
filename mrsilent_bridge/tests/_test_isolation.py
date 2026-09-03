@@ -65,8 +65,9 @@ already tolerates):
     rejected) when the block ends is left untouched, and — like the
     campaign/escalation guarantees above — a proposal that already
     existed before the block started is never this block's to touch.
-  - terminalizes any job_ledger record that did NOT exist before the
-    block started and is still in a non-terminal state (2026-09-03 gap-
+  - terminalizes any job_ledger record that (a) did NOT exist before the
+    block started, (b) is still in a non-terminal state, AND (c) carries
+    the exact test-fixture provenance markers below (2026-09-03 gap-
     closure round — the SAME structural gap the proposal fix above closed,
     one layer short again: job_ledger.py is a real, durable, production
     ledger the autonomous_cycle's own _startup_recovery() scans every
@@ -77,11 +78,24 @@ already tolerates):
     escalated by the real recovery scanner as unrecoverable). Terminalized
     via job_ledger.checkpoint(..., JobState.FAILED, terminal_result=
     "test_teardown", error_class="test_fixture") — the same real, governed
-    API every production caller uses, never raw ledger.json mutation. A
-    job that already reached a terminal state on its own (e.g. this
-    project's own _make_failed_job()-style fixtures) is left untouched,
-    and — like every other guarantee above — a job that already existed
-    before the block started is never this block's to touch.
+    API every production caller uses, never raw ledger.json mutation.
+    Condition (c) — CONCURRENCY SAFETY (2026-09-03, second gap-closure
+    round): "new since the block started" is NOT sufficient by itself —
+    MR. SILENT's real autonomous-cycle timer can create a genuine
+    production job while a test happens to be running, and that job would
+    also be "new since the block started" despite being completely real.
+    Requiring BOTH newness AND is_test_isolation_fixture_job()'s exact
+    marker match (sandbox_path=="/tmp" AND requested_by in {"tester",
+    "test"} — the same scheme mechanically proven against 23 real leftover
+    fixtures with zero false positives/negatives in the prior gap-closure
+    round) makes it structurally impossible for teardown to touch a real
+    job: no real production caller anywhere in this codebase uses "/tmp"
+    as a sandbox_path or "tester"/"test" as a requested_by identity. A job
+    that already reached a terminal state on its own (e.g. this project's
+    own _make_failed_job()-style fixtures) is left untouched, a job
+    lacking full marker confirmation is left untouched (fail closed, never
+    guessed), and — like every other guarantee above — a job that already
+    existed before the block started is never this block's to touch.
     error_class="test_fixture" is intentionally NOT one of
     classify_ledger_failure_transience()'s recognized classes, so it
     always resolves to "AMBIGUOUS" (non-transient, fail-closed) — a
@@ -119,6 +133,81 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 # same single source of truth instead of re-deciding what's "safe to wipe".
 PRESERVED_SUBJECTS = {"telegram_app_reconciliation"}
 _PRESERVED_SUBJECTS = PRESERVED_SUBJECTS  # internal alias, kept for readability below
+
+
+# CONCURRENCY-SAFE test-fixture provenance for job_ledger teardown
+# (2026-09-03, second gap-closure round). Exported (not underscore-
+# prefixed) for the same reason PRESERVED_SUBJECTS is: other code that
+# needs the identical, already-proven marker scheme (e.g. tests/conftest.py's
+# pytest-invocation fixture) must reuse this single source of truth rather
+# than re-deciding what counts as "obviously a test job". Mechanically
+# proven against 23 real leftover fixtures with zero false positives/
+# negatives (prior gap-closure round, 2026-09-03) -- no real production
+# caller anywhere in this codebase uses "/tmp" as a job's sandbox_path or
+# "tester"/"test" as a requested_by identity, so this can never match a
+# genuine job, including one created concurrently by the real autonomous-
+# cycle timer while a test happens to be running.
+TEST_FIXTURE_SANDBOX_PATH = "/tmp"
+TEST_FIXTURE_REQUESTED_BY = {"tester", "test"}
+
+
+def is_test_isolation_fixture_job(record) -> bool:
+    """True only if BOTH provenance markers match exactly. Fails closed
+    (False) for anything else, including a record missing one marker --
+    never guessed, never inferred from timing or state alone."""
+    return (record.sandbox_path == TEST_FIXTURE_SANDBOX_PATH
+            and record.requested_by in TEST_FIXTURE_REQUESTED_BY)
+
+
+def _reconcile_new_test_fixture_jobs(before_job_ids: set) -> None:
+    """The actual job_ledger teardown logic, factored out so it has
+    exactly one real dependency (job_ledger, tracked) and can be reused by
+    both isolated_test_state() (below) and isolated_job_ledger_state()
+    (2026-09-03, PYTEST_LEDGER_ISOLATION) without either one duplicating
+    it. Terminalizes a record only if it (a) postdates before_job_ids, (b)
+    is still non-terminal, and (c) matches is_test_isolation_fixture_job()
+    exactly -- see that function's own docstring for why (c) is required,
+    not merely (a)+(b)."""
+    import job_ledger
+    terminal_values = {s.value for s in job_ledger.TERMINAL_STATES}
+    for r in job_ledger.list_all():
+        if r.job_id in before_job_ids:
+            continue  # pre-existing — not this block's to touch
+        if r.state in terminal_values:
+            continue  # already terminal on its own — nothing to tear down
+        if not is_test_isolation_fixture_job(r):
+            continue  # new since the block started, but lacks test provenance --
+            # could be a real job created concurrently (e.g. the real
+            # autonomous-cycle timer firing mid-test); fail closed, never touch
+        job_ledger.checkpoint(
+            r.job_id, job_ledger.JobState.FAILED,
+            terminal_result="test_teardown", error_class="test_fixture",
+            note="isolated_test_state: automatic teardown — job created during a test run and left non-terminal",
+        )
+
+
+@contextlib.contextmanager
+def isolated_job_ledger_state() -> Iterator[None]:
+    """Narrow, dependency-minimal counterpart to isolated_test_state()
+    below -- job_ledger coverage ONLY, no campaign/escalation/sensor-
+    session/proposal teardown. isolated_test_state() imports campaign,
+    evolution.founder_request, and live_sensor_governance, all three of
+    which are (as of 2026-09-03) themselves untracked in this repo --
+    fine for the pre-existing `__main__`-block usage (those files already
+    exist wherever isolated_test_state() itself does), but wrong for
+    tests/conftest.py's pytest fixture, which must stay importable from a
+    clean checkout using only tracked dependencies. This context manager
+    depends on nothing but job_ledger (tracked) and this module's own
+    tracked helpers. Reuses _reconcile_new_test_fixture_jobs() -- the
+    identical teardown logic and provenance requirement isolated_test_
+    state() uses for job_ledger, not a second implementation to keep in
+    sync."""
+    import job_ledger
+    before_job_ids = {r.job_id for r in job_ledger.list_all()}
+    try:
+        yield
+    finally:
+        _reconcile_new_test_fixture_jobs(before_job_ids)
 
 
 @contextlib.contextmanager
@@ -169,14 +258,4 @@ def isolated_test_state() -> Iterator[None]:
                 pf.stem, proposal_mod.ProposalStatus.REJECTED,
                 note="isolated_test_state: automatic teardown — proposal created during a test run and left non-terminal",
             )
-        terminal_values = {s.value for s in job_ledger.TERMINAL_STATES}
-        for r in job_ledger.list_all():
-            if r.job_id in before_job_ids:
-                continue  # pre-existing — not this block's to touch
-            if r.state in terminal_values:
-                continue  # already terminal on its own — nothing to tear down
-            job_ledger.checkpoint(
-                r.job_id, job_ledger.JobState.FAILED,
-                terminal_result="test_teardown", error_class="test_fixture",
-                note="isolated_test_state: automatic teardown — job created during a test run and left non-terminal",
-            )
+        _reconcile_new_test_fixture_jobs(before_job_ids)
