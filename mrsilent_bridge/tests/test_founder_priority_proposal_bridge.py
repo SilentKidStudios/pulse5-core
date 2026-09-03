@@ -135,6 +135,48 @@ def test_live_governing_rank_already_proposed_is_not_duplicated() -> None:
           obs == [], str(obs))
 
 
+def test_live_rank1_state_is_founder_gated_open_not_actionable() -> None:
+    """Live proof of the exact deadlock this repair closes: real Rank-1 has
+    one REJECTED (terminal) low-risk proposal and one OBSERVED founder_gated
+    proposal. The tri-state classification must report founder_gated_open
+    (a real, unresolved gate) and NOT actionable and NOT terminal_only --
+    this is what drives autonomous_cycle.py's authority_block instead of a
+    misleading "none -- re-run later"."""
+    st = observe.classify_governing_priority_proposals("OMNISIM_AND_ORACLE_STUDIO_WIDE_ACTIVATION")
+    check("live Rank-1 has 2 known matches", len(st.matches) == 2, str([p.proposal_id for p in st.matches]))
+    check("live Rank-1 has zero actionable proposals (the low-risk one was rejected)", st.actionable == [])
+    check("live Rank-1 has exactly the founder_gated proposal open",
+          [p.proposal_id for p in st.founder_gated_open] == ["937a60b8-43d7-489c-b20a-645bc9879f10"],
+          str([p.proposal_id for p in st.founder_gated_open]))
+    check("live Rank-1 is NOT terminal_only (the founder_gated one is still open)", st.terminal_only is False)
+
+
+# --------------------------------------------------------------------- #
+# 3b. THE CORE DEADLOCK FIX: a rank whose ONLY proposal is rejected/terminal
+# must NOT be treated as "has an existing proposal" -- the bridge must
+# re-fire so the gap can be reconciled, not silently suppressed forever.
+# --------------------------------------------------------------------- #
+def test_rejected_only_proposal_does_not_suppress_actionable_gap() -> None:
+    rank_id = _synthetic_rank_id()
+    p = proposal_mod.create(
+        observed_weakness=f"a delta for {rank_id} that will be rejected",
+        proposed_upgrade="n/a", risk_score="low", origin="manual")
+    proposal_mod.advance(p.proposal_id, proposal_mod.ProposalStatus.REJECTED,
+                          note="synthetic terminal-only test — deliberately rejected, not cleaned up early")
+    try:
+        st = observe.classify_governing_priority_proposals(rank_id)
+        check("the rejected proposal is recorded as a match", len(st.matches) == 1, str(st.matches))
+        check("the rejected proposal is not actionable", st.actionable == [])
+        check("the rejected proposal is not an open founder_gated block either", st.founder_gated_open == [])
+        check("terminal_only is True -- everything that exists is closed", st.terminal_only is True)
+
+        obs = observe.signal_governing_priority_needs_proposal(rank_id)
+        check("bridge signal RE-FIRES when the only proposal is rejected/terminal "
+              "(the exact deadlock this repair closes)", len(obs) == 1, str(obs))
+    finally:
+        pass  # already REJECTED (terminal) -- _cleanup() would be a no-op; nothing further to close
+
+
 # --------------------------------------------------------------------- #
 # 4. end-to-end through observe.run(): exactly one founder_gated proposal
 # --------------------------------------------------------------------- #
@@ -203,6 +245,25 @@ def test_ordinary_low_risk_proposal_still_eligible_without_founder_gate() -> Non
         _cleanup(p.proposal_id, "synthetic ordinary-eligibility test — cleaned up per test-artifact policy")
 
 
+def test_no_duplicate_proposal_when_actionable_low_risk_proposal_exists() -> None:
+    """A rank with an actionable (low-risk, open) proposal must classify as
+    actionable, must NOT get a redundant authority-block trigger, and the
+    bridge signal must not duplicate it."""
+    rank_id = _synthetic_rank_id()
+    p = proposal_mod.create(
+        observed_weakness=f"an already-scoped, actionable low-risk delta for {rank_id}",
+        proposed_upgrade="n/a", risk_score="low", origin="manual")
+    try:
+        st = observe.classify_governing_priority_proposals(rank_id)
+        check("the actionable proposal is classified as actionable", [x.proposal_id for x in st.actionable] == [p.proposal_id])
+        check("an actionable match never counts as a founder_gated block", st.founder_gated_open == [])
+        check("an actionable match is never terminal_only", st.terminal_only is False)
+        obs = observe.signal_governing_priority_needs_proposal(rank_id)
+        check("bridge signal creates nothing new while an actionable proposal exists", obs == [], str(obs))
+    finally:
+        _cleanup(p.proposal_id, "synthetic actionable-dedup test — cleaned up per test-artifact policy")
+
+
 def test_founder_gated_bridge_proposal_never_auto_eligible() -> None:
     rank_id = _synthetic_rank_id()
     obs = observe.signal_governing_priority_needs_proposal(rank_id)
@@ -217,17 +278,93 @@ def test_founder_gated_bridge_proposal_never_auto_eligible() -> None:
         _cleanup(p.proposal_id, "synthetic protected-gate test — cleaned up per test-artifact policy")
 
 
+def test_eligibility_semantics_shared_with_advance_not_duplicated() -> None:
+    """No second risk/eligibility policy: classify_governing_priority_proposals
+    must call the literal SAME function object evolution/advance.py's own
+    advance_eligible() uses, not a re-implementation that could drift."""
+    check("observe.py's advance_mod._eligible IS the real evolution.advance._eligible function",
+          observe.advance_mod._eligible is advance._eligible)
+    code = _code_only(observe.classify_governing_priority_proposals)
+    check("classify_governing_priority_proposals delegates eligibility to advance_mod._eligible, "
+          "does not re-derive risk/status rules itself",
+          "advance_mod._eligible(" in code, code)
+    check("classify_governing_priority_proposals does not hardcode its own risk_score comparison "
+          "(that belongs to advance_mod._eligible alone)",
+          'risk_score ==' not in code and 'risk_score !=' not in code, code)
+
+
+def test_founder_gated_only_match_would_surface_truthful_authority_block() -> None:
+    """Proves the exact trigger condition autonomous_cycle.py uses
+    (gov_state.founder_gated_open and not gov_state.actionable) against a
+    synthetic founder_gated-only rank -- the condition under which run_cycle()
+    appends a real authority_block instead of reporting a misleading
+    "none -- re-run later". Does not call run_cycle() itself (see module
+    docstring); the wiring itself is proven by source inspection below."""
+    rank_id = _synthetic_rank_id()
+    p = proposal_mod.create(
+        observed_weakness=f"an already-scoped but founder_gated delta for {rank_id}",
+        proposed_upgrade="n/a", risk_score="founder_gated", origin="manual")
+    try:
+        st = observe.classify_governing_priority_proposals(rank_id)
+        would_block = bool(st.founder_gated_open) and not st.actionable
+        check("a founder_gated-only match sets the exact condition run_cycle() uses "
+              "to append a truthful authority_block", would_block is True, str(st))
+        check("the block would name the real proposal_id",
+              st.founder_gated_open[0].proposal_id == p.proposal_id)
+    finally:
+        _cleanup(p.proposal_id, "synthetic authority-block test — cleaned up per test-artifact policy")
+
+
+def test_no_silent_gate_downgrade() -> None:
+    """classify_governing_priority_proposals and the bridge signal are
+    read-only -- neither may ever advance/approve/mutate a proposal's own
+    status or risk_score (that would be an auto-downgrade of a real Founder
+    gate, exactly what this repair must never do)."""
+    for fn in (observe.classify_governing_priority_proposals, observe.signal_governing_priority_needs_proposal):
+        code = _code_only(fn)
+        check(f"{fn.__name__} never calls proposal_mod.advance()/save() (no gate downgrade)",
+              "proposal_mod.advance(" not in code and ".save(" not in code, code)
+        check(f"{fn.__name__} never assigns .risk_score or .status on a proposal",
+              ".risk_score =" not in code and ".status =" not in code, code)
+    rank_id = _synthetic_rank_id()
+    p = proposal_mod.create(observed_weakness=f"gate for {rank_id}", proposed_upgrade="n/a",
+                             risk_score="founder_gated", origin="manual")
+    try:
+        before = (p.status, p.risk_score)
+        observe.classify_governing_priority_proposals(rank_id)
+        observe.signal_governing_priority_needs_proposal(rank_id)
+        after_p = proposal_mod.load(p.proposal_id)
+        check("the founder_gated proposal's status/risk_score are byte-for-byte unchanged after classification",
+              (after_p.status, after_p.risk_score) == before, f"{before} -> {(after_p.status, after_p.risk_score)}")
+    finally:
+        _cleanup(p.proposal_id, "synthetic no-downgrade test — cleaned up per test-artifact policy")
+
+
+def test_no_direct_priority_state_mutation() -> None:
+    """The bridge only ever READS founder_priority_state.json (via the
+    existing governor, unchanged) and never writes it -- classifying
+    proposals must not touch priority truth-state at all."""
+    state_path = Path("/opt/pulse5-core/mr_silent_spine/state/founder_priority_state.json")
+    before = state_path.read_bytes()
+    observe.classify_governing_priority_proposals("OMNISIM_AND_ORACLE_STUDIO_WIDE_ACTIVATION")
+    observe.signal_governing_priority_needs_proposal("OMNISIM_AND_ORACLE_STUDIO_WIDE_ACTIVATION")
+    autonomous_cycle._consume_founder_top10()
+    check("founder_priority_state.json is byte-for-byte unchanged after the full bridge read path",
+          state_path.read_bytes() == before)
+
+
 # --------------------------------------------------------------------- #
 # 7. no competing scheduler / no duplicate selector invocation
 # --------------------------------------------------------------------- #
 def test_bridge_signal_invokes_no_selector_no_subprocess() -> None:
-    code = _code_only(observe.signal_governing_priority_needs_proposal)
-    check("bridge signal does not invoke the multi_goal_arbiter selector",
-          "multi_goal_arbiter" not in code and "multi_goal_selection" not in code, code)
-    check("bridge signal does not call the blending selector apply_governor",
-          "apply_governor" not in code, code)
-    check("bridge signal does not spawn a subprocess or new scheduler",
-          "subprocess" not in code and "Popen" not in code and "schedule" not in code.lower(), code)
+    for fn in (observe.signal_governing_priority_needs_proposal, observe.classify_governing_priority_proposals):
+        code = _code_only(fn)
+        check(f"{fn.__name__} does not invoke the multi_goal_arbiter selector",
+              "multi_goal_arbiter" not in code and "multi_goal_selection" not in code, code)
+        check(f"{fn.__name__} does not call the blending selector apply_governor",
+              "apply_governor" not in code, code)
+        check(f"{fn.__name__} does not spawn a subprocess or new scheduler",
+              "subprocess" not in code and "Popen" not in code and "schedule" not in code.lower(), code)
 
 
 def test_autonomous_cycle_threads_existing_governor_result_not_a_new_call() -> None:
@@ -241,6 +378,17 @@ def test_autonomous_cycle_threads_existing_governor_result_not_a_new_call() -> N
           i_hook < i_governing_arg < i_observe + 200, f"{i_hook} / {i_governing_arg} / {i_observe}")
     check("run_cycle() does not call choose_governing_rank a second time itself",
           "choose_governing_rank" not in body)
+    i_classify = body.index("observe_mod.classify_governing_priority_proposals(")
+    check("run_cycle() reuses classify_governing_priority_proposals (single source of truth), "
+          "does not re-implement the actionable/founder_gated/terminal split itself",
+          i_observe < i_classify, f"{i_observe} / {i_classify}")
+    check("run_cycle() never calls proposal_mod.advance()/approves a proposal itself (no silent gate downgrade)",
+          "proposal_mod.advance(" not in body[i_classify:i_classify + 1500])
+    i_authblock = body.index("record.authority_blocks.append({", i_classify)
+    check("the authority_block append is gated on founder_gated_open AND NOT actionable "
+          "(never fires while real forward progress exists)",
+          "gov_state.founder_gated_open and not gov_state.actionable" in body[i_classify:i_authblock + 50],
+          body[i_classify:i_authblock + 200])
 
 
 if __name__ == "__main__":

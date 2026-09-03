@@ -856,13 +856,32 @@ def run_cycle(*, requested_by: str = "autonomous_cycle") -> CycleRecord:
                                      + observe_report.proposals_known_deferred
                                      + observe_report.proposals_on_cooldown)
         record.capability_gaps = sorted(_capability_gap_proposal_ids(observe_report))
-        # Truthful, cheap-to-verify signal for whether the CURRENT governing
-        # Founder rank has any proposal at all yet -- derived from whether the
-        # bridge signal above fired, never recomputed independently (single
-        # source of truth, no duplicate proposal-store scan elsewhere).
+        # Truthful, tri-state Founder Top-10 proposal classification -- reuses
+        # the SAME evolution/advance.py::_eligible() semantics as the bridge
+        # signal above (single source of truth, computed once). Replaces a
+        # prior coarse "any proposal exists" boolean that let a rejected/
+        # terminal proposal silently suppress this forever even when nothing
+        # was actionable AND nothing was pending Founder review -- a real
+        # deadlock (mechanically proven 2026-09-03, commit e240d80 gap).
+        # A genuinely open founder_gated match becomes an explicit
+        # authority_block (the SAME field advance_eligible()'s own
+        # authority-block reporting already uses) so final_status correctly
+        # reports "blocked" with a truthful reason instead of a misleading
+        # "work_performed" / "none -- re-run later" when a real Founder
+        # decision, not more autonomous activity, is what's actually needed.
         if record.founder_top10.get("consumed") and record.founder_top10.get("governing_id"):
-            record.founder_top10["governing_rank_has_existing_proposal"] = not any(
-                o["signal_type"] == "founder_priority_unproposed" for o in observe_report.observations)
+            gov_state = observe_mod.classify_governing_priority_proposals(record.founder_top10["governing_id"])
+            record.founder_top10["governing_rank_has_actionable_proposal"] = bool(gov_state.actionable)
+            record.founder_top10["governing_rank_has_founder_gated_proposal"] = bool(gov_state.founder_gated_open)
+            record.founder_top10["governing_rank_has_terminal_only_proposals"] = gov_state.terminal_only
+            if gov_state.founder_gated_open and not gov_state.actionable:
+                for p in gov_state.founder_gated_open:
+                    record.authority_blocks.append({
+                        "proposal_id": p.proposal_id,
+                        "reason": (f"Founder Top-10 rank '{record.founder_top10['governing_id']}' has an open "
+                                   f"{p.risk_score} proposal (status={p.status}) awaiting explicit Founder "
+                                   f"review/approval -- preserved, never auto-advanced or auto-downgraded"),
+                    })
         _save(record)
 
         if time.monotonic() - t0 > MAX_CYCLE_WALLCLOCK_S:

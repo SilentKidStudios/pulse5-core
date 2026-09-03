@@ -32,6 +32,9 @@ from typing import Any
 
 import audit
 import capability_registry
+from evolution import advance as advance_mod  # reuse the SAME eligibility semantics
+# advance_eligible() already uses (advance_mod._eligible()) -- never a second
+# risk/eligibility policy, see classify_governing_priority_proposals() below.
 from evolution import proposal as proposal_mod
 
 BRIDGE_ROOT = Path(__file__).resolve().parent.parent
@@ -374,6 +377,40 @@ def signal_capability_gaps() -> list[Observation]:
     return obs
 
 
+@dataclass
+class GoverningPriorityProposalState:
+    """Truthful classification of every canonical proposal (open OR closed)
+    that already references a Founder Top-10 governing rank -- built from the
+    SAME eligibility semantics evolution/advance.py::_eligible() already uses
+    for advance_eligible(), never a second risk/eligibility policy. Replaces
+    a prior coarse "any proposal exists (any status)" check that let a single
+    rejected/terminal proposal silently suppress the bridge signal forever,
+    even when nothing was actually actionable or pending Founder review --
+    a real deadlock (mechanically proven 2026-09-03, commit e240d80 gap)."""
+    matches: list[Any]
+    actionable: list[Any]          # advance_mod._eligible() is True for these -- the existing timer already picks them up unattended, no gate involved
+    founder_gated_open: list[Any]  # status not in CLOSED_STATUSES, not actionable -- a real, unresolved Founder gate
+    terminal_only: bool            # matches exist but EVERY one is CLOSED_STATUSES (rejected/promoted/rolled_back) -- nothing left to wait on
+
+
+def classify_governing_priority_proposals(governing_priority_id: str | None) -> GoverningPriorityProposalState:
+    """Reusable by both the OBSERVE bridge signal below and
+    autonomous_cycle.py's founder_top10 truthful-state fields -- single
+    source of truth, computed once per cycle, not re-derived twice."""
+    if not governing_priority_id:
+        return GoverningPriorityProposalState([], [], [], False)
+    matches = [
+        p for p in proposal_mod.list_all()
+        if governing_priority_id in (p.observed_weakness or "") or governing_priority_id in (p.proposed_upgrade or "")
+    ]
+    actionable = [p for p in matches if advance_mod._eligible(p)[0]]
+    actionable_ids = {p.proposal_id for p in actionable}
+    open_matches = [p for p in matches if p.status not in proposal_mod.CLOSED_STATUSES]
+    founder_gated_open = [p for p in open_matches if p.proposal_id not in actionable_ids]
+    terminal_only = bool(matches) and not open_matches
+    return GoverningPriorityProposalState(matches, actionable, founder_gated_open, terminal_only)
+
+
 def signal_governing_priority_needs_proposal(governing_priority_id: str | None) -> list[Observation]:
     """Bridges the Founder Top-10 governing rank (already read every cycle by
     autonomous_cycle._consume_founder_top10(), via the existing read-only
@@ -381,12 +418,14 @@ def signal_governing_priority_needs_proposal(governing_priority_id: str | None) 
     governor, it only receives the id it already computed) to the canonical
     proposal pipeline.
 
-    Fires ONLY when the governing rank has no proposal at all yet anywhere in
-    the canonical store (open OR closed/rejected/founder_gated — checked by a
-    plain substring match against the proposal's own text, the same identity
-    every other proposal for a Founder rank already uses; no new schema).
-    That keeps this idempotent and duplicate-free without a second selector,
-    a second proposal store, or a second scheduler.
+    Fires ONLY when the governing rank has GENUINELY NOTHING to wait on: no
+    matching proposal at all, or every matching proposal that ever existed is
+    now terminal (rejected/promoted/rolled_back) with none open. An
+    actionable low-risk proposal, or an open founder_gated one still awaiting
+    Founder review, both correctly suppress this (see
+    classify_governing_priority_proposals()) -- a rejected/terminal proposal
+    alone never does, so this can re-fire and reconcile after a rejection
+    instead of deadlocking silently forever.
 
     Deliberately NEVER suggests risk_score="low" itself: an un-scoped
     strategic Founder priority is not yet an ordinary authorized engineering
@@ -397,14 +436,16 @@ def signal_governing_priority_needs_proposal(governing_priority_id: str | None) 
     exactly like every other low-risk proposal already does."""
     if not governing_priority_id:
         return []
-    for p in proposal_mod.list_all():
-        if governing_priority_id in (p.observed_weakness or "") or governing_priority_id in (p.proposed_upgrade or ""):
-            return []  # already has at least one proposal (any status) -- do not duplicate
+    state = classify_governing_priority_proposals(governing_priority_id)
+    if state.matches and not state.terminal_only:
+        return []  # actionable and/or an open founder_gated proposal already exists -- do not duplicate
     now = datetime.now(timezone.utc).isoformat()
     return [Observation(
         observation_id="obs-0", created_at=now, signal_type="founder_priority_unproposed",
-        description=f"Founder Top-10 governing priority '{governing_priority_id}' has no engineering proposal yet",
-        evidence={"governing_priority_id": governing_priority_id},
+        description=f"Founder Top-10 governing priority '{governing_priority_id}' has no actionable or pending proposal"
+                     + (f" (its only {len(state.matches)} prior proposal(s) are all terminal/closed)" if state.matches else ""),
+        evidence={"governing_priority_id": governing_priority_id,
+                  "terminal_proposal_ids": [p.proposal_id for p in state.matches]},
         severity="medium",
         suggested_risk_score="founder_gated",
         dedupe_key=[f"founder_priority_unproposed:{governing_priority_id}"],
