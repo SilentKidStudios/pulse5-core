@@ -158,3 +158,52 @@ def test_founder_gated_branch_does_not_block_unrelated_work(monkeypatch, tmp_pat
     assert "unrelated" in result.completed
     assert "gated" not in result.dispatched
     assert wg.load("gated").state == wg.WorkState.BLOCKED_FOUNDER
+
+
+def test_ordinary_failure_autonomously_repairs_and_completes_without_manual_dispatch(monkeypatch, tmp_path):
+    """FAILURE_REPAIR_OR_REPROPOSAL_AUTONOMOUS end-to-end through the
+    scheduler: an item fails twice (simulated transient flake), is
+    auto-retried via retry_repairable_failed() each pass once its backoff
+    elapses, and completes on its third attempt -- no manual re-dispatch."""
+    _fresh(monkeypatch, tmp_path)
+    wg.create("flaky", kind="task", description="flaky")
+    attempts = {"count": 0}
+
+    def _flaky_then_succeeds(item):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise RuntimeError("simulated transient flake")
+        return {"ok": True}
+
+    for _ in range(6):  # enough passes for two backoff-elapsed retries
+        record = wg.load("flaky")
+        if record.state == wg.WorkState.REPAIRABLE_FAILED and record.next_retry_at:
+            record.next_retry_at = ""  # test-only: collapse backoff so the loop doesn't need real sleep
+            wg._save(record)
+        sched.run_scheduler_pass(self_session_id="self", executor_fn=_flaky_then_succeeds, resource_vector=_healthy_vector())
+        if wg.load("flaky").state == wg.WorkState.COMPLETED:
+            break
+
+    assert wg.load("flaky").state == wg.WorkState.COMPLETED
+    assert attempts["count"] == 3
+    assert wg.load("flaky").repair_attempts == 2
+
+
+def test_repair_budget_exhaustion_surfaces_as_founder_gate_not_silent_loss(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    monkeypatch.setattr(wg, "MAX_REPAIR_ATTEMPTS", 1)
+    wg.create("always-fails", kind="task", description="always-fails")
+
+    def _always_fails(item):
+        raise RuntimeError("permanent-looking failure")
+
+    for _ in range(4):
+        record = wg.load("always-fails")
+        if record.state == wg.WorkState.REPAIRABLE_FAILED and record.next_retry_at:
+            record.next_retry_at = ""
+            wg._save(record)
+        sched.run_scheduler_pass(self_session_id="self", executor_fn=_always_fails, resource_vector=_healthy_vector())
+        if wg.load("always-fails").state == wg.WorkState.BLOCKED_FOUNDER:
+            break
+
+    assert wg.load("always-fails").state == wg.WorkState.BLOCKED_FOUNDER  # escalated, not lost

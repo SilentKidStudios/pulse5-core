@@ -43,6 +43,7 @@ class SchedulerPassResult:
     repairable_failed: list[str] = field(default_factory=list)
     duplicate_claim_rejections: int = 0
     reclaimed_stale: list[str] = field(default_factory=list)
+    repair_retried: list[str] = field(default_factory=list)
     peak_concurrent_observed: int = 0
     dynamic_safe_concurrency: int = 0
     concurrency_limit_reason: str = ""
@@ -110,6 +111,7 @@ def run_scheduler_pass(
     """
     result = SchedulerPassResult()
     result.reclaimed_stale = wg.reclaim_stale()
+    result.repair_retried = wg.retry_repairable_failed()
 
     vector = resource_vector if resource_vector is not None else da.read_resource_vector()
     allowed, reason = da.admission_decision(vector, required_mem_mb=per_worker_mem_mb)
@@ -182,6 +184,7 @@ def run_until_drained(
             owner_prefix=owner_prefix,
         )
         passes.append(pass_result)
-        if not wg.runnable_items(self_session_id=self_session_id) and not pass_result.dispatched:
+        pending_repair = any(r.state == wg.WorkState.REPAIRABLE_FAILED for r in wg.list_all())
+        if not wg.runnable_items(self_session_id=self_session_id) and not pass_result.dispatched and not pending_repair:
             break
     return passes

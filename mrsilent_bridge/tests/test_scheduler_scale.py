@@ -115,3 +115,40 @@ def test_scale_tier(monkeypatch, tmp_path, n, capsys):
     assert deadlocked == 0, f"deadlocked items remain after drain: blocked={still_blocked} running={still_running}"
     assert completed == n, f"not all items completed: {completed}/{n}"
     assert terminal_failed == 0
+
+
+def test_anti_starvation_survives_200_competing_high_priority_arrivals(monkeypatch, tmp_path):
+    """FAIR_SCHEDULING / ANTI_STARVATION at volume, not just in a 2-item unit
+    test: one old, low-priority item competes against 200 fresh, high-
+    priority items under a small per-pass dispatch budget (heavy
+    contention). Real elapsed time cannot be waited on in a test, so the
+    old item's age is injected directly (the correct technique for testing
+    time-dependent logic, same as this file's other backdating tests) --
+    but once injected, it must survive real competition from 200 real
+    sibling items sorted by the real effective_priority() code path, not
+    just be asserted in isolation."""
+    _fresh(monkeypatch, tmp_path)
+    from datetime import datetime, timedelta, timezone
+
+    old = wg.create("old-starved-candidate", kind="task", description="old low priority", priority=1.0)
+    old.created_at = (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat()
+    wg._save(old)
+
+    for i in range(200):
+        wg.create(f"fresh-high-{i}", kind="task", description=f"fresh high priority {i}", priority=9.0)
+
+    def _executor(item: wg.WorkItem) -> dict:
+        return {"ok": True}
+
+    passes = sched.run_until_drained(
+        self_session_id="starvation-harness", executor_fn=_executor,
+        resource_vector=_healthy_vector(), max_passes=100,
+    )
+    for i, p in enumerate(passes):
+        if "old-starved-candidate" in p.dispatched:
+            assert i < 5, f"old low-priority item was starved for {i} passes despite 20h of accumulated age"
+            break
+    else:
+        assert False, "old low-priority item never ran at all — starved indefinitely"
+
+    assert wg.load("old-starved-candidate").state == wg.WorkState.COMPLETED

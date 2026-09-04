@@ -262,6 +262,56 @@ def test_session_ownership_integration_blocks_and_recovers(monkeypatch, tmp_path
     assert "touches-evolution" in runnable_ids_after
 
 
+def test_repairable_failed_is_not_immediately_retried_before_backoff(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    wg.create("bad", kind="task", description="bad")
+    wg.mark_repairable_failed("bad", result={"error": "flaky"})
+    assert wg.load("bad").next_retry_at != ""
+    requeued = wg.retry_repairable_failed()
+    assert requeued == []  # backoff has not elapsed yet
+    assert wg.load("bad").state == wg.WorkState.REPAIRABLE_FAILED
+
+
+def test_repairable_failed_is_retried_once_backoff_elapses(monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+    _fresh(monkeypatch, tmp_path)
+    wg.create("bad", kind="task", description="bad")
+    wg.mark_repairable_failed("bad", result={"error": "flaky"})
+    record = wg.load("bad")
+    record.next_retry_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()  # already elapsed
+    wg._save(record)
+
+    requeued = wg.retry_repairable_failed()
+    assert requeued == ["bad"]
+    reloaded = wg.load("bad")
+    assert reloaded.state == wg.WorkState.RUNNABLE
+    assert reloaded.repair_attempts == 1
+
+
+def test_repairable_failed_escalates_to_founder_after_budget_exhausted(monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+    _fresh(monkeypatch, tmp_path)
+    monkeypatch.setattr(wg, "MAX_REPAIR_ATTEMPTS", 2)
+    wg.create("bad", kind="task", description="bad")
+
+    for _ in range(2):
+        wg.mark_repairable_failed("bad", result={"error": "flaky"})
+        record = wg.load("bad")
+        record.next_retry_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        wg._save(record)
+        requeued = wg.retry_repairable_failed()
+        assert requeued == ["bad"]  # still within budget
+
+    # third failure exhausts the budget -> Founder escalation, not silent drop
+    wg.mark_repairable_failed("bad", result={"error": "flaky"})
+    record = wg.load("bad")
+    record.next_retry_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    wg._save(record)
+    requeued = wg.retry_repairable_failed()
+    assert requeued == []
+    assert wg.load("bad").state == wg.WorkState.BLOCKED_FOUNDER
+
+
 def _unused_pid() -> int:
     candidate = 2_000_000
     while _pid_exists(candidate):

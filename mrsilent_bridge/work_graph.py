@@ -54,6 +54,8 @@ STALE_AFTER_S = 900
 MAX_CHILDREN_PER_PARENT = 25       # bounded fan-out: one parent's direct dependency-children
 MAX_RECURSIVE_DEPTH = 12           # bounded recursive dependency-discovery depth
 MAX_RESUME_ATTEMPTS = 1            # a crashed RUNNING item may be auto-requeued at most once
+MAX_REPAIR_ATTEMPTS = 3            # a REPAIRABLE_FAILED item may be auto-retried this many times
+                                    # before Founder escalation (campaign section 14)
 
 
 class WorkState:
@@ -120,6 +122,8 @@ class WorkItem:
     pid: int = 0
     hostname: str = ""
     resume_count: int = 0
+    repair_attempts: int = 0        # bounded auto-retry count for REPAIRABLE_FAILED — see retry_repairable_failed()
+    next_retry_at: str = ""         # deterministic backoff floor before the next auto-retry may fire
     created_at: str = ""
     updated_at: str = ""
     heartbeat: str = ""
@@ -346,13 +350,67 @@ def mark_terminal_failed(work_id: str, *, result: dict[str, Any] | None = None) 
     return _save(record, note="terminal_failed")
 
 
+def _retry_backoff_at(attempt: int, *, now: datetime | None = None) -> str:
+    """Deterministic backoff, same shape as job_ledger.retry_ready_at(): a
+    pure function of attempt count in [60, 120] seconds — never a raw
+    sleep, never unbounded, never dependent on how often the caller
+    happens to check."""
+    now = now or datetime.now(timezone.utc)
+    backoff_seconds = 60 + ((attempt - 1) % 61)
+    from datetime import timedelta
+    return (now + timedelta(seconds=backoff_seconds)).isoformat()
+
+
+def _retry_is_ready(ready_at: str, *, now: datetime | None = None) -> bool:
+    if not ready_at:
+        return True
+    now = now or datetime.now(timezone.utc)
+    try:
+        dt_ready = datetime.fromisoformat(ready_at)
+    except (ValueError, TypeError):
+        return True  # unreadable deadline — fail open to "ready" rather than stuck forever
+    if dt_ready.tzinfo is None:
+        dt_ready = dt_ready.replace(tzinfo=timezone.utc)
+    return now >= dt_ready
+
+
 def mark_repairable_failed(work_id: str, *, result: dict[str, Any] | None = None) -> WorkItem:
     record = load(work_id)
     if record is None:
         raise ValueError(f"no work item {work_id!r}")
     record.state = WorkState.REPAIRABLE_FAILED
     record.result = result
+    record.next_retry_at = _retry_backoff_at(record.repair_attempts + 1)
     return _save(record, note="repairable_failed — eligible for governed repair/reproposal")
+
+
+def retry_repairable_failed() -> list[str]:
+    """FAILURE_REPAIR_OR_REPROPOSAL_AUTONOMOUS + RETRY_BUDGETING (campaign
+    section 14): a REPAIRABLE_FAILED item is automatically requeued to
+    RUNNABLE once its deterministic backoff window elapses, up to
+    MAX_REPAIR_ATTEMPTS times — no caller has to manually re-dispatch an
+    ordinary repairable failure. Once that budget is exhausted, the item is
+    NOT silently dropped — it moves to BLOCKED_FOUNDER (the same state a
+    genuine authority gate uses), so a real Founder escalation happens
+    ("Founder escalation when genuinely required") instead of the item
+    quietly vanishing. Safe to call every scheduling pass — only items
+    whose backoff has actually elapsed are touched."""
+    now = datetime.now(timezone.utc)
+    requeued = []
+    for record in list_all():
+        if record.state != WorkState.REPAIRABLE_FAILED:
+            continue
+        if not _retry_is_ready(record.next_retry_at, now=now):
+            continue
+        if record.repair_attempts >= MAX_REPAIR_ATTEMPTS:
+            record.state = WorkState.BLOCKED_FOUNDER
+            _save(record, note=f"repair budget exhausted ({record.repair_attempts} attempts) — escalated to Founder")
+            continue
+        record.repair_attempts += 1
+        record.state = WorkState.RUNNABLE
+        _save(record, note=f"repair attempt {record.repair_attempts}/{MAX_REPAIR_ATTEMPTS} — requeued")
+        requeued.append(record.work_id)
+    return requeued
 
 
 def resume_eligible_parents() -> list[str]:
