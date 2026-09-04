@@ -170,3 +170,63 @@ def list_pending_founder_requests() -> list[dict[str, Any]]:
         if d.get("status") == "pending_founder_review" and "payload" in d:
             out.append(d)
     return out
+
+
+def mark_notification_sent(escalation_id: str) -> dict[str, Any]:
+    """Records that an external notification (e.g. Telegram) was actually
+    delivered for this escalation -- additive to the notification_sent
+    field request_founder_decision() already writes as False. Never
+    changes status/decision; never invented as a side effect of anything
+    else (only the real notification-delivery call site should call this)."""
+    path = ESCALATIONS_DIR / f"{escalation_id}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"no escalation record {escalation_id}")
+    record = json.loads(path.read_text())
+    record["notification_sent"] = True
+    record["notification_sent_at"] = datetime.now(timezone.utc).isoformat()
+    record.pop("notification_note", None)
+    path.write_text(json.dumps(record, indent=2))
+    return record
+
+
+def reset_notification_sent(escalation_id: str) -> dict[str, Any]:
+    """Clears notification_sent so the SAME existing durable record becomes
+    eligible again for the already-running notifier's own natural scan --
+    used ONLY to re-verify a repaired delivery mechanism against a record
+    that already exists, never to create a new/duplicate request. Never
+    touches status/decision/payload."""
+    path = ESCALATIONS_DIR / f"{escalation_id}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"no escalation record {escalation_id}")
+    record = json.loads(path.read_text())
+    record["notification_sent"] = False
+    record.pop("notification_sent_at", None)
+    path.write_text(json.dumps(record, indent=2))
+    return record
+
+
+def _cli() -> None:
+    """Bounded CLI surface so render-forge-01's pulse_bridge.py can list/
+    resolve/mark-notified these EXACT durable records over the existing
+    SSH transport, without a second approval database or a new network
+    service -- same real functions this module already exposes to local
+    callers, just reachable remotely the same way PULSE_RENDERER and
+    autonomy_status_snapshot.py already are for other Pulse data."""
+    import sys
+    args = sys.argv[1:]
+    if args[:1] == ["list"]:
+        print(json.dumps(list_pending_founder_requests()))
+        return
+    if args[:1] == ["resolve"] and len(args) >= 3:
+        note = args[3] if len(args) > 3 else ""
+        print(json.dumps(resolve_founder_decision(args[1], args[2], note=note)))
+        return
+    if args[:1] == ["mark-notified"] and len(args) >= 2:
+        print(json.dumps(mark_notification_sent(args[1])))
+        return
+    print("usage: founder_request.py list | resolve <id> approved|denied [note] | mark-notified <id>", file=__import__("sys").stderr)
+    raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    _cli()
