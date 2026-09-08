@@ -157,6 +157,8 @@ class CycleRecord:
     phase_r_campaigns: dict[str, Any] = field(default_factory=dict)  # Phase R — see _maybe_advance_one_campaign()
     omni_registry_stewardship: dict[str, Any] = field(default_factory=dict)  # Phase S — see _maybe_pursue_omni_registry_stewardship() (Permanent Studio Stewardship, second bounded slice, Founder-authorized 2026-08-24)
     founder_top10: dict[str, Any] = field(default_factory=dict)  # Persistent-clock Founder Top-10 consumption — see _consume_founder_top10()
+    workgraph_scheduler_phase: dict[str, Any] = field(default_factory=dict)  # Phase T — see _maybe_run_workgraph_scheduler_phase() (WALK-AWAY CONVERGENCE live-integration, 2026-09-04)
+    mission_stewardship_phase: dict[str, Any] = field(default_factory=dict)  # Phase U — see _maybe_run_continuous_stewardship_phase() (mission-layer reconciliation, 2026-09-06)
     errors: list[str] = field(default_factory=list)
     final_status: str = "running"  # idle | work_performed | blocked | error | crashed (reconciled post-hoc by a later cycle)
     next_recommended_action: str | None = None
@@ -444,6 +446,169 @@ def _maybe_pursue_omni_registry_stewardship(record: CycleRecord) -> None:
     record.omni_registry_stewardship = {"ran": True, "campaign_created": bool(result.get("campaign_id")), **result}
 
 
+def _maybe_run_workgraph_scheduler_phase(record: CycleRecord) -> None:
+    """Phase T — WALK-AWAY CONVERGENCE live-integration (2026-09-04). Runs
+    ONLY when every earlier phase this cycle, through Phase S, already left
+    idle — the same "genuinely idle cycle only" contract Phase S uses,
+    placed after it so Phase T only fills a slot Phase S itself did not
+    use; it never preempts or races real higher-priority work, and never
+    runs twice in the same cycle.
+
+    Populates work_graph.py WorkItems from the SAME canonical open-proposal
+    store proposal_work_bridge.py already reads (idempotent and restart-
+    safe — see that module's own docstring for why repeated calls never
+    duplicate or re-arm in-flight/finished work), then runs ONE bounded,
+    resource-aware scheduler pass that may advance SEVERAL eligible
+    proposals CONCURRENTLY via evolution.advance.advance_one() — the exact
+    same single-proposal function advance_eligible() above already calls
+    one at a time. This creates no second execution/governance authority;
+    see proposal_work_bridge.py and scheduler.py's own docstrings for the
+    full reasoning and their own test coverage.
+
+    MISSION_ACTIVATION_WIRING (2026-09-06): also runs failure_diagnosis.
+    diagnose() — PURE READ, zero side effects, never mutates a WorkItem or
+    creates a new one (see that module's own docstring) — over every item
+    this pass's own repairable_failed list names, for truthful
+    observability into WHY something failed rather than a bare work_id.
+
+    FINAL_CLOSURE_WAVE (2026-09-06): create_repair_work() is now also
+    called, but ONLY when diagnose() itself actually returns DIAGNOSIS_
+    NEEDS_REPAIR — never for TRANSIENT (the existing bounded blind-retry
+    path already handles that unchanged) or the fail-closed UNKNOWN
+    default. Currently mechanically inert under real evidence: nothing in
+    this codebase ever sets a job result's "missing_prerequisite" key, so
+    diagnose() cannot yet return NEEDS_REPAIR in practice — this wires the
+    dormant capability exactly like _founder_top10_priority_source() was
+    wired dormant until a real trigger existed, not a claim that repair
+    work is being created today. If/when a real evidence source starts
+    setting missing_prerequisite, note the SAME open question flagged for
+    work_discovery.py's decomposition: the resulting "repair"-kind
+    WorkItem would face the identical NotAProposalWorkItem problem
+    (scheduler.py's only registered executor requires a proposal_id) the
+    moment it becomes RUNNABLE and gets dispatched — safely contained by
+    the existing bounded-retry-then-BLOCKED_FOUNDER-escalation safety net
+    (proven this session), but wasteful and momentarily misleading, not a
+    real fix. Building that executor remains a deliberate, undone design
+    decision, not something to invent speculatively here.
+
+    Entirely wrapped in one try/except, mirroring Phase S's own defensive
+    pattern immediately above: a failure anywhere in this bounded, best-
+    effort phase (import, population, or dispatch) must never crash the
+    cycle or block any other phase's own final_status/next_recommended_
+    action from being recorded."""
+    try:
+        import proposal_work_bridge
+        import scheduler_cycle_hook
+        import failure_diagnosis
+        import general_workitem_executor
+        population = proposal_work_bridge.upsert_workitems_from_proposals()
+        # NON_PROPOSAL_EXECUTOR_CLOSURE (2026-09-08): the composite executor
+        # closes exactly the gap FINAL_CLOSURE_WAVE's own comment above
+        # named (a "repair"-kind WorkItem had no executor at all). Provenance-
+        # audited before this change: the peer session this call site's own
+        # module docstring warned about (tmux "mrsilent-walkaway-final-gap")
+        # no longer exists, and this exact line was still unmodified by any
+        # other session at the time of this edit — confirmed via a live
+        # ownership/provenance audit, not assumed. Delegates the proposal
+        # case to the SAME unchanged proposal_work_bridge.make_advance_
+        # executor() this line always called; only adds a second, additive
+        # dispatch branch for kind=="repair" (see general_workitem_executor.py).
+        phase_result = scheduler_cycle_hook.run_scheduler_phase(
+            executor_fn=general_workitem_executor.make_general_executor())
+        failure_diagnoses: dict[str, Any] = {}
+        repair_work_created: dict[str, str] = {}
+        for work_id in phase_result.get("repairable_failed", []):
+            try:
+                diagnosis = failure_diagnosis.diagnose(work_id)
+            except Exception as e:  # noqa: BLE001 — one bad diagnosis must never break the phase
+                diagnosis = {"diagnosis": "unknown", "reason": f"diagnosis_error: {e!r}"}
+            failure_diagnoses[work_id] = diagnosis
+            if diagnosis.get("diagnosis") == failure_diagnosis.DIAGNOSIS_NEEDS_REPAIR:
+                try:
+                    repair = failure_diagnosis.create_repair_work(work_id, diagnosis)
+                    repair_work_created[work_id] = repair.work_id
+                except Exception as e:  # noqa: BLE001 — a repair-creation failure must never break the phase
+                    failure_diagnoses[work_id] = {**diagnosis, "repair_creation_error": repr(e)}
+        record.workgraph_scheduler_phase = {
+            "ran": True, "population": population, **phase_result,
+            "failure_diagnoses": failure_diagnoses, "repair_work_created": repair_work_created,
+        }
+    except Exception as e:  # noqa: BLE001 — a scheduler-phase failure must never crash the cycle
+        record.workgraph_scheduler_phase = {"ran": True, "error": repr(e)}
+
+
+def _maybe_run_continuous_stewardship_phase(record: CycleRecord) -> None:
+    """Phase U — mission-layer reconciliation (2026-09-06). Unlike Phase S/T,
+    this runs EVERY cycle unconditionally, not only on an otherwise-idle
+    cycle: mission.py's rollup (a Mission's state is a pure function of its
+    own root WorkItems' real work_graph.py states) must stay truthful even
+    on a cycle where Phase T just dispatched/completed real work — gating
+    reconciliation behind "nothing else happened" would mean a mission
+    whose last child just completed THIS cycle would show a stale state
+    until some future idle cycle happened to run it. This is safe to run
+    unconditionally because continuous_stewardship_pass() never dispatches
+    or preempts anything itself (see that module's own docstring/tests):
+    reconcile_all_missions() is pure read-then-writeback rollup, and its
+    has_actionable_work() gate means the ONLY side effect possible here —
+    creating one new Mission via next_priority_source — only ever fires on
+    a cycle with genuinely zero runnable work, exactly like Phase S.
+
+    MISSION_ACTIVATION_WIRING (2026-09-06): next_priority_source is now
+    _founder_top10_priority_source() — the existing, already-proven
+    Founder Top-10 governor consumption, reused, never a second/competing
+    priority authority (see that function's own docstring). This still
+    can only ever CREATE a Mission record (mission.create_mission()) —
+    never decompose one into dispatchable child WorkItems. Decomposition
+    (work_discovery.py's real wiring) is deliberately NOT done in this
+    wave: mission.decompose_idempotent() creates WorkItems with a caller-
+    supplied `kind` that is never "proposal", but scheduler.py's only
+    registered executor (proposal_work_bridge.make_advance_executor())
+    raises NotAProposalWorkItem for anything without a proposal_id in
+    provenance — mechanically confirmed this session. Wiring real
+    decomposition without first building (or deciding not to need) an
+    executor for that other kind would create a NEW churn source
+    (RUNNABLE -> dispatched -> NotAProposalWorkItem -> REPAIRABLE_FAILED
+    forever until budget exhaustion), the exact class of bug this
+    session's DEFERRED-proposal fix just closed elsewhere — so it is
+    correctly left unwired rather than rushed. A created Mission is
+    therefore currently a durable, truthful record of "this is the
+    Studio's current top governing priority" with zero root_work_item_ids
+    — sync_mission_state() already handles that state correctly
+    ("nothing decomposed yet — remains ACTIVE, awaiting decomposition").
+
+    has_actionable_work() (continuous_stewardship.py) is now scoped to
+    mission-owned work only, not the whole WorkGraph — see that function's
+    own docstring for the WORKGRAPH_IDLE_LIVENESS fix this closes.
+
+    Entirely wrapped in try/except, mirroring every other bounded
+    best-effort phase in this file — a stewardship-phase failure must
+    never crash the cycle or block final_status/next_recommended_action
+    from being recorded."""
+    try:
+        import continuous_stewardship
+        from scheduler_cycle_hook import CANONICAL_CYCLE_SESSION_ID
+        # REAL_WORK_CLOSURE (2026-09-06): ensure a Mission exists for this
+        # session's one Founder-authorized secondary priority BEFORE
+        # reconciliation runs below, so a fresh deployment's very first
+        # natural cycle can create the mission AND materialize its real
+        # work in the same pass, not two cycles apart. Idempotent, and
+        # scoped to the exact same narrow allowlist real-work discovery
+        # itself uses — see _ensure_authorized_secondary_priority_missions()'s
+        # own docstring for why this is needed (the existing next_priority_
+        # source only ever surfaces the single current GOVERNING rank).
+        secondary_missions_ensured = _ensure_authorized_secondary_priority_missions()
+        record.mission_stewardship_phase = {
+            "ran": True,
+            "secondary_missions_ensured": secondary_missions_ensured,
+            **continuous_stewardship.continuous_stewardship_pass(
+                self_session_id=CANONICAL_CYCLE_SESSION_ID,
+                next_priority_source=_founder_top10_priority_source,
+            ),
+        }
+    except Exception as e:  # noqa: BLE001 — a stewardship-phase failure must never crash the cycle
+        record.mission_stewardship_phase = {"ran": True, "error": repr(e)}
+
+
 def _reconcile_abandoned_cycles(this_cycle_id: str) -> None:
     """Marks any OTHER cycle record still at final_status=="running" as
     "crashed" — provably safe to do here specifically: this function is only
@@ -569,7 +734,7 @@ def _startup_recovery(cycle_id: str, *, requested_by: str, max_jobs: int) -> lis
 
         if outcome == "escalated_not_recovered" or outcome.startswith("resume_refused_"):
             try:
-                founder_request.request_founder_decision(
+                escalation = founder_request.request_founder_decision(
                     subject=f"stuck job_ledger record {r.job_id}",
                     finding=f"job {r.job_id} (task: {r.task[:150]!r}) has been stuck in state={r.state!r} "
                             f"since {r.created_at} and startup recovery could not resolve it "
@@ -586,6 +751,17 @@ def _startup_recovery(cycle_id: str, *, requested_by: str, max_jobs: int) -> lis
                                         "record only — resolving it is entirely a human/founder decision",
                     requested_by=f"autonomous_cycle:{cycle_id}",
                 )
+                # PHASE T STARVATION FIX (2026-09-05): request_founder_decision()
+                # only advances updated_at when this exact call actually created
+                # the record or changed its payload (see its own dedup logic) --
+                # last_seen_at is bumped to "now" on EVERY call regardless.
+                # Equal timestamps means THIS call is what created/changed the
+                # escalation (genuinely new finding this cycle); unequal means
+                # this is a pure, unchanged re-observation of an already-known,
+                # already-Founder-notified condition -- never mutates the job
+                # or the escalation itself, only how THIS cycle's "did work
+                # happen" signal is computed downstream.
+                actions[-1]["escalation_fresh"] = (escalation.get("updated_at") == escalation.get("last_seen_at"))
             except Exception as e:  # noqa: BLE001 — surfacing a finding must never crash the cycle
                 actions[-1]["escalation_error"] = repr(e)
 
@@ -737,6 +913,123 @@ def _consume_founder_top10() -> dict[str, Any]:
             "note": "cache projection is stale vs canonical ACTION authority — regenerate the projection",
         }
     return out
+
+
+def _founder_top10_priority_source() -> dict[str, Any] | None:
+    """MISSION_ACTIVATION_WIRING (2026-09-06): next_priority_source for
+    Phase U's continuous_stewardship_pass(). Reuses the SAME already-
+    proven, read-only governor consumption _consume_founder_top10() itself
+    performs every cycle (_load_founder_priority_governor() +
+    gov.choose_governing_rank(_SPINE_STATE_DIR)) — no second selector
+    invocation, no new/competing priority authority, never writes priority
+    or completion state. This is a strict CONSUMER of the existing
+    canonical Founder Top-10 order, identical in spirit to how OBSERVE's
+    classify_governing_priority_proposals() consumes the same governing
+    rank for the (separate, untouched) proposal pipeline — this function
+    only feeds the mission layer's OWN durable record of "what is
+    currently the Studio's top governing priority," never the proposal
+    pipeline itself.
+
+    Returns a Mission candidate {"goal", "priority", "provenance"} built
+    from the governing rank's own real "note" text in the canonical
+    ACTION-priority-governor authority record (the same file
+    _canonical_action_authority_order() already reads), or None if the
+    governor/canonical record is unavailable, unreadable, or names no
+    governing rank — fail-closed, exactly matching _consume_founder_
+    top10()'s own "governor_unavailable" degradation. mission.
+    create_mission()'s own goal-fingerprint idempotency means calling this
+    every cycle with an unchanged governing rank always resolves to the
+    SAME existing active Mission, never a duplicate."""
+    gov = _load_founder_priority_governor()
+    if gov is None:
+        return None
+    try:
+        governing, _evaluations = gov.choose_governing_rank(_SPINE_STATE_DIR)
+    except Exception:  # noqa: BLE001 — a priority read must never break stewardship
+        return None
+    if not governing:
+        return None
+    governing_id = governing.get("id")
+    governing_rank = governing.get("rank")
+    if not governing_id:
+        return None
+    try:
+        raw = json.loads(_CANONICAL_ACTION_AUTHORITY_PATH.read_text())
+        entries = {r.get("id"): r for r in raw.get("durable_priority_queue", [])}
+    except Exception:  # noqa: BLE001
+        entries = {}
+    entry = entries.get(governing_id, {})
+    goal_text = entry.get("note") or f"Founder Top-10 rank {governing_rank}: {governing_id}"
+    return {
+        "goal": goal_text,
+        "priority": float(11 - governing_rank) if governing_rank else 0.0,  # rank 1 -> 10.0 ... rank 10 -> 1.0
+        "provenance": {
+            "source": "founder_top10_priority_governor",
+            "canonical_action_authority": _CANONICAL_ACTION_AUTHORITY_ID,
+            "governing_rank": governing_rank,
+            "governing_id": governing_id,
+        },
+    }
+
+
+def _ensure_authorized_secondary_priority_missions() -> list[str]:
+    """REAL_WORK_CLOSURE (2026-09-06): _founder_top10_priority_source()
+    above only ever surfaces the single CURRENT GOVERNING rank (via
+    gov.choose_governing_rank() — currently rank 1, OMNISIM_AND_ORACLE_
+    STUDIO_WIDE_ACTIVATION, explicitly off-limits this session), so no
+    Mission would ever be created for continuous_stewardship.
+    AUTHORIZED_REAL_WORK_GOVERNING_IDS's one Founder-authorized secondary
+    source (MR_SILENT_APP_COMPLETION, Founder Top-10 rank 2) while a
+    different, excluded rank holds the top governing position — a real
+    gap mechanically confirmed by this session's own first natural cycle
+    after deployment (work_ensured correctly rejected the existing
+    OmniSim mission, but nothing existed yet for rank 2 to act on).
+
+    Creates (idempotently, via mission.create_mission()'s own fingerprint
+    dedup — calling this every cycle with the same authorized id and its
+    unchanged canonical goal text never creates a duplicate Mission) a
+    Mission for each id in the SAME explicit, narrow allowlist continuous_
+    stewardship.py's real-work-discovery guard already uses — the two are
+    deliberately the same set, read from continuous_stewardship.py rather
+    than duplicated, so there is exactly one place this session's
+    authorized-source list is defined. Reads the SAME canonical authority
+    record and rank->priority mapping _founder_top10_priority_source()
+    already uses; never invents text, never reorders or mutates the
+    canonical rank ordering itself (read-only against that file, exactly
+    like the existing governing-rank consumption)."""
+    try:
+        import continuous_stewardship
+        import mission
+    except Exception:  # noqa: BLE001 — a missing dependency must never break the cycle
+        return []
+    try:
+        raw = json.loads(_CANONICAL_ACTION_AUTHORITY_PATH.read_text())
+        entries = {r.get("id"): r for r in raw.get("durable_priority_queue", [])}
+    except Exception:  # noqa: BLE001
+        return []
+
+    created_ids: list[str] = []
+    for rank_id in continuous_stewardship.AUTHORIZED_REAL_WORK_GOVERNING_IDS:
+        entry = entries.get(rank_id)
+        if entry is None:
+            continue  # not a real canonical rank -- never fabricate one
+        rank = entry.get("rank")
+        goal_text = entry.get("note") or f"Founder Top-10 rank {rank}: {rank_id}"
+        try:
+            m = mission.create_mission(
+                goal_text, origin="discovered",
+                priority=float(11 - rank) if rank else 0.0,
+                provenance={
+                    "source": "authorized_secondary_priority",
+                    "canonical_action_authority": _CANONICAL_ACTION_AUTHORITY_ID,
+                    "governing_rank": rank,
+                    "governing_id": rank_id,
+                },
+            )
+        except Exception:  # noqa: BLE001 — one bad rank must never break the others
+            continue
+        created_ids.append(m.mission_id)
+    return created_ids
 
 
 def run_cycle(*, requested_by: str = "autonomous_cycle") -> CycleRecord:
@@ -935,7 +1228,23 @@ def run_cycle(*, requested_by: str = "autonomous_cycle") -> CycleRecord:
         _maybe_advance_one_campaign(record)
         _save(record)
 
-        recovery_did_something = any(a["outcome"] not in ("left_untouched",) for a in record.recovery_actions)
+        # PHASE T STARVATION FIX (2026-09-05): a recovery action whose outcome
+        # is a genuine resume attempt (SAFE_RESUME/RESTART_FROM_SANDBOX --
+        # these never set "escalation_fresh", so .get(...) defaults True) or a
+        # NEWLY created/changed escalation this cycle (escalation_fresh=True,
+        # see _startup_recovery()) still counts as real work. A PURE, UNCHANGED
+        # re-observation of an already-known, already-Founder-notified stuck
+        # job (escalation_fresh=False) does not -- closes a real starvation
+        # bug where such a job (verified unchanged for ~13 days,
+        # job_ledger 49015fc2) silently prevented Phase T from EVER reaching a
+        # cycle where it could run, on every single natural cycle, forever.
+        # The job/escalation themselves are completely untouched by this --
+        # only whether this cycle's own "did work happen" signal counts an
+        # unchanged repeat as fresh activity.
+        recovery_did_something = any(
+            a["outcome"] not in ("left_untouched",) and a.get("escalation_fresh", True)
+            for a in record.recovery_actions
+        )
         phase_k_did_something = any(pk["status"] == "integration_succeeded" for pk in record.phase_k_pursuits)
         phase_r_did_something = any(t.get("started_proposal_id") for t in record.phase_r_campaigns.get("campaigns_touched", []))
         work_happened_before_stewardship = bool(record.proposals_created or record.proposals_advanced or recovery_did_something
@@ -949,7 +1258,26 @@ def run_cycle(*, requested_by: str = "autonomous_cycle") -> CycleRecord:
             _save(record)
 
         phase_s_did_something = bool(record.omni_registry_stewardship.get("campaign_created"))
-        work_happened = work_happened_before_stewardship or phase_s_did_something
+        work_happened_before_workgraph = work_happened_before_stewardship or phase_s_did_something
+
+        # Phase T only ever runs on a cycle every earlier phase (through
+        # Phase S) already left idle — same contract, placed after Phase S
+        # so Phase T only fills a slot Phase S itself did not use.
+        if not work_happened_before_workgraph:
+            _maybe_run_workgraph_scheduler_phase(record)
+            _save(record)
+
+        phase_t_did_something = bool(record.workgraph_scheduler_phase.get("dispatched"))
+        work_happened_before_stewardship_reconcile = work_happened_before_workgraph or phase_t_did_something
+
+        # Phase U runs EVERY cycle, unconditionally — see
+        # _maybe_run_continuous_stewardship_phase()'s own docstring for why
+        # reconciliation must never be gated behind "nothing else happened".
+        _maybe_run_continuous_stewardship_phase(record)
+        _save(record)
+
+        phase_u_did_something = bool(record.mission_stewardship_phase.get("next_mission_created"))
+        work_happened = work_happened_before_stewardship_reconcile or phase_u_did_something
 
         if not work_happened:
             record.final_status = "idle"

@@ -41,6 +41,8 @@ class SchedulerPassResult:
     dispatched: list[str] = field(default_factory=list)
     completed: list[str] = field(default_factory=list)
     repairable_failed: list[str] = field(default_factory=list)
+    terminal_failed: list[str] = field(default_factory=list)
+    capability_unplaceable: list[str] = field(default_factory=list)
     duplicate_claim_rejections: int = 0
     reclaimed_stale: list[str] = field(default_factory=list)
     repair_retried: list[str] = field(default_factory=list)
@@ -85,6 +87,38 @@ def _run_claimed_item(
         tracker.exit()
 
 
+def _filter_by_capability_placement(items: list[wg.WorkItem]) -> tuple[list[wg.WorkItem], list[str]]:
+    """MULTI_NODE_PLACEMENT gate: an item that declares resource_
+    requirements["required_capabilities"] (e.g. ["gpu"]) is only placeable
+    if node_capability_registry.placement_decision() finds a real,
+    currently-healthy node for it — fail-closed exactly like that
+    module's own contract (a never-checked/stale/unhealthy node is never
+    guessed as fine). An item with no such declaration is unaffected
+    (backward compatible with every existing local-only item). An
+    unplaceable item is never dropped or marked failed — it simply stays
+    RUNNABLE and is excluded from this pass's candidates, exactly like an
+    item that loses the resource-admission budget; a later pass (once a
+    capable node registers/becomes healthy) picks it up automatically."""
+    try:
+        import node_capability_registry as ncr
+    except ImportError:
+        return items, []  # soft dependency — degrade to "no capability gating" if absent
+
+    placeable = []
+    unplaceable = []
+    for item in items:
+        required = (item.resource_requirements or {}).get("required_capabilities")
+        if not required:
+            placeable.append(item)
+            continue
+        decision = ncr.placement_decision(required_capabilities=required)
+        if decision.node_id is None:
+            unplaceable.append(item.work_id)
+        else:
+            placeable.append(item)
+    return placeable, unplaceable
+
+
 def run_scheduler_pass(
     *,
     self_session_id: str,
@@ -123,10 +157,42 @@ def run_scheduler_pass(
         return result  # fail closed: host pressure means "run nothing new this pass"
 
     runnable = wg.runnable_items(self_session_id=self_session_id)
+    placeable, result.capability_unplaceable = _filter_by_capability_placement(runnable)
     budget = result.dynamic_safe_concurrency
     if max_items is not None:
         budget = min(budget, max_items)
-    candidates = runnable[:budget] if budget > 0 else []
+
+    # FRESH_WORK_LIVENESS (2026-09-06): reserve exactly ONE bounded
+    # dispatch slot per pass for the freshest eligible item — see
+    # work_graph.freshest_eligible()'s own docstring for the precise
+    # starvation-direction gap this closes and why effective_priority()'s
+    # existing aging bonus alone does not cover it. Only takes effect
+    # when there is real budget headroom (budget >= 2, i.e. never at the
+    # cold-swap-bounded cap of 1), a genuinely different freshest item
+    # exists outside the top-priority selection already made, AND that
+    # item is_meaningfully_fresher() than the marginal item it would
+    # displace (work_graph.FRESH_WORK_MIN_AGE_GAP_MINUTES) — without this
+    # last check, "pick whichever item is nominally most recent" fires on
+    # pure creation-order noise between items created in the same instant
+    # (a real regression this session's own test suite caught: a
+    # synthetic 3-item batch created back-to-back displaced a
+    # deliberately-different, unrelated test item). Old backlog's
+    # existing FIFO-by-age fairness is otherwise completely unchanged
+    # (still gets budget-1 of budget slots, same ordering as before);
+    # this never adds capacity, never bypasses resource admission, and
+    # never dispatches more than `budget` items total.
+    if budget >= 2 and len(placeable) > budget:
+        top = placeable[:budget - 1]
+        freshest = wg.freshest_eligible(placeable)
+        top_ids = {item.work_id for item in top}
+        displaced = placeable[budget - 1]
+        if (freshest is not None and freshest.work_id not in top_ids
+                and wg.is_meaningfully_fresher(freshest, displaced)):
+            candidates = top + [freshest]
+        else:
+            candidates = placeable[:budget]
+    else:
+        candidates = placeable[:budget] if budget > 0 else []
 
     claimed: list[wg.WorkItem] = []
     for item in candidates:
@@ -149,7 +215,18 @@ def run_scheduler_pass(
             item = futures[future]
             work_id, ok, payload = future.result()
             wg.release(work_id, owner=f"{owner_prefix}:{work_id}")
-            if ok:
+            if ok and payload.get("__terminal_failed__"):
+                # a successful executor call that itself concluded the
+                # underlying work is permanently, genuinely closed (e.g.
+                # proposal_work_bridge's rejected-proposal case) — not a
+                # scheduler/executor error, so it did not raise, but also
+                # not retry-eligible; mark_repairable_failed()'s bounded
+                # retry would be pointless (and, for a proposal, actively
+                # wrong: the closed proposal store would refuse to
+                # re-advance it anyway).
+                wg.mark_terminal_failed(work_id, result=payload)
+                result.terminal_failed.append(work_id)
+            elif ok:
                 wg.mark_completed(work_id, result=payload)
                 result.completed.append(work_id)
             else:
