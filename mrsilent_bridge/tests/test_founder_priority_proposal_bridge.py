@@ -319,6 +319,79 @@ def test_eligibility_semantics_shared_with_advance_not_duplicated() -> None:
           'risk_score ==' not in code and 'risk_score !=' not in code, code)
 
 
+def test_all_proposals_cache_param_matches_uncached_result_across_multiple_ranks() -> None:
+    """AUTHORITY_BLOCKS_SCOPE gap-closure (2026-09-08): proves the real fix
+    two ways at once -- (1) the optional _all_proposals cache produces
+    byte-identical results to the uncached path (so sharing ONE
+    proposal_mod.list_all() read across every Top-10 rank, as autonomous_
+    cycle.py now does, is provably safe), and (2) a genuine founder-gated
+    proposal on a SECOND, non-governing rank is correctly classified as
+    founder_gated_open when scanned this way -- the exact real gap (7 real
+    proposals on ranks 3/4/5/7/8/9/10 were invisible to authority_blocks
+    before this fix, confirmed live) this closes."""
+    rank_a = _synthetic_rank_id()
+    rank_b = _synthetic_rank_id()
+    pa = proposal_mod.create(observed_weakness=f"gate A for {rank_a}", proposed_upgrade="n/a",
+                              risk_score="founder_gated", origin="manual")
+    pb = proposal_mod.create(observed_weakness=f"gate B for {rank_b}", proposed_upgrade="n/a",
+                              risk_score="founder_gated", origin="manual")
+    for p in (pa, pb):
+        proposal_mod.refine(
+            p.proposal_id,
+            implementation_scope="test fixture", non_file_scope="test fixture",
+            validation_plan="test fixture", canary_plan="test fixture",
+            paid_resources_required=False, credential_changes_required=False,
+            production_promotion_required=False, destructive_action_required=False,
+            model_change_required=False, isolation_change_required=False, campaign_collision=False,
+        )
+    try:
+        all_proposals = proposal_mod.list_all()
+        for rank_id, target_id in ((rank_a, pa.proposal_id), (rank_b, pb.proposal_id)):
+            uncached = observe.classify_governing_priority_proposals(rank_id)
+            cached = observe.classify_governing_priority_proposals(rank_id, _all_proposals=all_proposals)
+            check(f"cached and uncached founder_gated_open agree for {rank_id}",
+                  [p.proposal_id for p in cached.founder_gated_open] ==
+                  [p.proposal_id for p in uncached.founder_gated_open])
+            check(f"the genuine founder-gate on {rank_id} is correctly found via the shared-list path "
+                  "(the real multi-rank scan mechanism autonomous_cycle.py now uses)",
+                  target_id in [p.proposal_id for p in cached.founder_gated_open],
+                  [p.proposal_id for p in cached.founder_gated_open])
+    finally:
+        _cleanup(pa.proposal_id, "synthetic multi-rank cache test A — cleaned up per test-artifact policy")
+        _cleanup(pb.proposal_id, "synthetic multi-rank cache test B — cleaned up per test-artifact policy")
+
+
+def test_synthetic_origin_proposal_never_surfaces_as_authority_block() -> None:
+    """AUTHORITY_BLOCKS_SCOPE gap-closure (2026-09-08): a test/synthetic-
+    origin proposal that happens to match a rank_id substring must never
+    masquerade as a real Founder demand -- proven directly against the
+    real classifier autonomous_cycle.py's new multi-rank loop calls."""
+    import test_origin_classifier as toc
+    rank_id = _synthetic_rank_id()
+    p = proposal_mod.create(observed_weakness=f"synthetic test fixture gate for {rank_id}",
+                             proposed_upgrade="n/a", risk_score="founder_gated", origin="manual")
+    proposal_mod.refine(
+        p.proposal_id,
+        implementation_scope="test fixture", non_file_scope="test fixture",
+        validation_plan="test fixture", canary_plan="test fixture",
+        paid_resources_required=False, credential_changes_required=False,
+        production_promotion_required=False, destructive_action_required=False,
+        model_change_required=False, isolation_change_required=False, campaign_collision=False,
+    )
+    try:
+        state = observe.classify_governing_priority_proposals(rank_id)
+        is_synthetic = toc.is_test_or_synthetic_origin(
+            text_blob=f"{p.origin} {p.observed_weakness} {p.proposed_upgrade}")
+        check("the fixture's own weakness text is correctly recognized as test/synthetic-origin "
+              "(proves the exact filter autonomous_cycle.py's new loop applies)",
+              is_synthetic is True, p.observed_weakness)
+        check("the proposal is still real founder_gated_open at the classifier level -- the ORIGIN "
+              "filter, not the classifier, is what must exclude it from authority_blocks",
+              p.proposal_id in [x.proposal_id for x in state.founder_gated_open])
+    finally:
+        _cleanup(p.proposal_id, "synthetic-origin authority-block test — cleaned up per test-artifact policy")
+
+
 def test_founder_gated_only_match_would_surface_truthful_authority_block() -> None:
     """Proves the exact trigger condition autonomous_cycle.py uses
     (gov_state.founder_gated_open and not gov_state.actionable) against a
@@ -428,12 +501,27 @@ def test_autonomous_cycle_threads_existing_governor_result_not_a_new_call() -> N
           "does not re-implement the actionable/founder_gated/terminal split itself",
           i_observe < i_classify, f"{i_observe} / {i_classify}")
     check("run_cycle() never calls proposal_mod.advance()/approves a proposal itself (no silent gate downgrade)",
-          "proposal_mod.advance(" not in body[i_classify:i_classify + 1500])
+          "proposal_mod.advance(" not in body[i_classify:i_classify + 3000])
+    # AUTHORITY_BLOCKS_SCOPE gap-closure (2026-09-08): the append now lives
+    # inside a per-rank loop (real incident this closed: a genuine
+    # founder-gate on any non-governing Top-10 rank was invisible to
+    # authority_blocks before this fix) — same intent, reworded guard
+    # ("not rank_state.founder_gated_open or rank_state.actionable" is the
+    # De Morgan equivalent of the original "founder_gated_open and not
+    # actionable"), reusing classify_governing_priority_proposals() again
+    # for every non-governing rank (never a second/divergent split).
     i_authblock = body.index("record.authority_blocks.append({", i_classify)
-    check("the authority_block append is gated on founder_gated_open AND NOT actionable "
-          "(never fires while real forward progress exists)",
-          "gov_state.founder_gated_open and not gov_state.actionable" in body[i_classify:i_authblock + 50],
-          body[i_classify:i_authblock + 200])
+    window = body[i_classify:i_authblock + 200]
+    check("the authority_block append is still gated on founder_gated_open AND NOT actionable "
+          "(never fires while real forward progress exists), now per-rank",
+          "not rank_state.founder_gated_open or rank_state.actionable" in window, window)
+    check("every non-governing rank reuses classify_governing_priority_proposals() again "
+          "(never a second/divergent actionable/founder_gated split)",
+          body.count("observe_mod.classify_governing_priority_proposals(") >= 2, body.count(
+              "observe_mod.classify_governing_priority_proposals("))
+    check("the multi-rank scan shares ONE proposal_mod.list_all() read via _all_proposals "
+          "(never an uncached per-rank re-scan of the real 7000+-proposal store)",
+          "_all_proposals=all_proposals" in body[i_classify:i_authblock])
 
 
 if __name__ == "__main__":

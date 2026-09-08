@@ -395,10 +395,28 @@ class GoverningPriorityProposalState:
     terminal_only: bool            # matches exist but EVERY one is CLOSED_STATUSES (rejected/promoted/rolled_back) -- nothing left to wait on
 
 
-def classify_governing_priority_proposals(governing_priority_id: str | None) -> GoverningPriorityProposalState:
+def classify_governing_priority_proposals(
+    governing_priority_id: str | None, *, _all_proposals: list | None = None,
+) -> GoverningPriorityProposalState:
     """Reusable by both the OBSERVE bridge signal below and
     autonomous_cycle.py's founder_top10 truthful-state fields -- single
     source of truth, computed once per cycle, not re-derived twice.
+
+    AUTHORITY_BLOCKS_SCOPE gap-closure (2026-09-08): _all_proposals lets a
+    caller that needs to check MULTIPLE governing_ids in one pass (real
+    case: autonomous_cycle.py's authority_blocks used to check only the
+    single current governing rank, so a genuine founder-gate on any other
+    Top-10 rank was invisible to it -- confirmed live: 7 real, correctly-
+    refined founder-gated proposals on ranks 3/4/5/7/8/9/10 this session)
+    supply proposal_mod.list_all()'s result ONCE rather than this function
+    re-reading and re-parsing the full proposal store from disk on every
+    call -- list_all() has no caching, and the real store already holds
+    7000+ proposals, so an uncached per-rank call here would be the exact
+    O(N*ranks) scan-cost regression this campaign already fixed once
+    elsewhere (classify_all(since=)). Optional and additive: every existing
+    caller (continuous_stewardship.py, signal_governing_priority_needs_
+    proposal() below) is unaffected, still gets its own fresh list_all()
+    read exactly as before.
 
     DOMAIN_F_TRUTHFULNESS gap-closure (2026-09-08): founder_gated_open used
     to bucket EVERY open, non-actionable match together regardless of WHY
@@ -418,8 +436,9 @@ def classify_governing_priority_proposals(governing_priority_id: str | None) -> 
     silently drift apart again."""
     if not governing_priority_id:
         return GoverningPriorityProposalState([], [], [], [], False)
+    all_proposals = _all_proposals if _all_proposals is not None else proposal_mod.list_all()
     matches = [
-        p for p in proposal_mod.list_all()
+        p for p in all_proposals
         if governing_priority_id in (p.observed_weakness or "") or governing_priority_id in (p.proposed_upgrade or "")
     ]
     actionable = [p for p in matches if advance_mod._eligible(p)[0]]

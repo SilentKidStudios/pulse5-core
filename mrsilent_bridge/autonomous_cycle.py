@@ -69,6 +69,7 @@ import local_model_health
 import omniengineer_harness
 import omni_registry_stewardship
 import organ_discovery
+import test_origin_classifier
 from evolution import advance as advance_mod
 from evolution import external_evolution
 from evolution import founder_request
@@ -1191,11 +1192,49 @@ def run_cycle(*, requested_by: str = "autonomous_cycle") -> CycleRecord:
             record.founder_top10["governing_rank_has_actionable_proposal"] = bool(gov_state.actionable)
             record.founder_top10["governing_rank_has_founder_gated_proposal"] = bool(gov_state.founder_gated_open)
             record.founder_top10["governing_rank_has_terminal_only_proposals"] = gov_state.terminal_only
-            if gov_state.founder_gated_open and not gov_state.actionable:
-                for p in gov_state.founder_gated_open:
+
+            # AUTHORITY_BLOCKS_SCOPE gap-closure (2026-09-08): the block
+            # above only ever checked the SINGLE current governing rank
+            # (record.founder_top10["governing_id"]) -- a genuine,
+            # decision-ready, unresolved founder-gate on any OTHER Top-10
+            # rank was real but invisible to authority_blocks. Real, live
+            # incident this closes: 7 proposals (ranks 3/4/5/7/8/9/10),
+            # each individually audited and refined this session, each
+            # genuinely risk_score=='founder_gated' and is_decision_ready(),
+            # each with no exact Founder decision recorded yet -- none of
+            # them ever appeared here despite being real. Checks every rank
+            # in the canonical Top-10 order (not just the governing one),
+            # reusing the EXACT SAME classify_governing_priority_proposals()
+            # this file already calls above -- never a second, divergent
+            # definition. proposal_mod.list_all() is read ONCE and shared
+            # across every rank via _all_proposals (see that function's own
+            # docstring) so this stays a single O(N) scan of the real
+            # 7000+-proposal store, not O(N*ranks). Synthetic/test-origin
+            # matches are excluded via test_origin_classifier -- the same,
+            # already-proven classifier this campaign's other real hygiene
+            # fixes already use -- so test fixtures can never masquerade as
+            # a real Founder demand here. Purely additive: never removes or
+            # changes the governing-rank-specific fields set just above.
+            all_proposals = proposal_mod.list_all()
+            seen_proposal_ids = {p["proposal_id"] for p in record.authority_blocks}
+            for rank_id in record.founder_top10.get("top10_full_order", []):
+                rank_state = (
+                    gov_state if rank_id == record.founder_top10["governing_id"]
+                    else observe_mod.classify_governing_priority_proposals(rank_id, _all_proposals=all_proposals)
+                )
+                if not rank_state.founder_gated_open or rank_state.actionable:
+                    continue
+                for p in rank_state.founder_gated_open:
+                    if p.proposal_id in seen_proposal_ids:
+                        continue
+                    if test_origin_classifier.is_test_or_synthetic_origin(
+                        text_blob=f"{p.origin} {p.observed_weakness} {p.proposed_upgrade}"
+                    ):
+                        continue
+                    seen_proposal_ids.add(p.proposal_id)
                     record.authority_blocks.append({
                         "proposal_id": p.proposal_id,
-                        "reason": (f"Founder Top-10 rank '{record.founder_top10['governing_id']}' has an open "
+                        "reason": (f"Founder Top-10 rank '{rank_id}' has an open "
                                    f"{p.risk_score} proposal (status={p.status}) awaiting explicit Founder "
                                    f"review/approval -- preserved, never auto-advanced or auto-downgraded"),
                     })
