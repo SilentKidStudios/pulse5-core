@@ -9,6 +9,7 @@ import failure_anomaly_discovery as fad
 import job_ledger
 import mission
 import omni_registry_stewardship as ors
+import omniregistry_manifest as orm
 import studio_status
 import validation_canary_selfheal_discovery as vcs
 import work_graph
@@ -20,6 +21,12 @@ def _fresh(monkeypatch, tmp_path):
     monkeypatch.setattr(observe, "OBSERVATIONS_DIR", tmp_path / "observations")
     (tmp_path / "observations").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(ors, "OMNI_REGISTRY_ROOT", tmp_path / "omni_registry")
+    # TEST_LIVE_STORE_CONTAMINATION-class fix (2026-09-08, same reasoning as
+    # work_graph.py's STATE_INDEX_DIR fix elsewhere this campaign): without
+    # this, every test here would read the REAL, live
+    # /opt/pulse5-core/omniregistry/registry.json instead of a fixture,
+    # making assertions about "empty studio" false.
+    monkeypatch.setattr(orm, "REGISTRY_MANIFEST_PATH", tmp_path / "omniregistry_registry.json")
     monkeypatch.setattr(mission, "MISSIONS_DIR", tmp_path / "missions")
     monkeypatch.setattr(work_graph, "ITEMS_DIR", tmp_path / "workitems" / "items")
     monkeypatch.setattr(job_ledger, "JOBS_ROOT", tmp_path / "jobs")
@@ -34,6 +41,41 @@ def test_collect_on_empty_studio_reports_all_zero(monkeypatch, tmp_path):
     assert s.anomalies_total == 0
     assert s.missions_total == 0
     assert s.workitems_total == 0
+    assert s.omniregistry_manifest_available is False
+    assert s.omniregistry_divisions_active == []
+
+
+def test_collect_reports_real_omniregistry_manifest_divisions(monkeypatch, tmp_path):
+    """DOMAIN_A gap-closure (2026-09-08): the real, live manifest
+    (omniregistry/registry.json) has entries in several real schema shapes
+    (division/active, project, system, future_entity/concept) — this proves
+    each is classified correctly and a future_entity is NEVER counted as an
+    active division, matching the real 'omnisim_expanded' shape found in the
+    live registry."""
+    import json
+    _fresh(monkeypatch, tmp_path)
+    orm.REGISTRY_MANIFEST_PATH.write_text(json.dumps({
+        "omni_forge": {"name": "omni_forge", "type": "division", "status": "active"},
+        "omni_lingua": {"name": "omni_lingua", "type": "division", "status": "active"},
+        "omniworld": {"name": "omniworld", "type": "flagship_project", "status": "project"},
+        "omniregistry": {"name": "omniregistry", "type": "system", "status": "active"},
+        "omnisim_expanded": {"name": "omnisim_expanded", "type": "future_entity", "status": "concept",
+                              "integration": "not_built"},
+        "omniscraper": {"last_updated": "x", "purpose": "legacy schema, no type key"},
+    }))
+
+    s = studio_status.collect()
+    assert s.omniregistry_manifest_available is True
+    assert s.omniregistry_manifest_total_entries == 6
+    assert s.omniregistry_divisions_active == ["omni_forge", "omni_lingua"]
+    assert s.omniregistry_projects_total == 1
+    assert s.omniregistry_systems_total == 1
+    assert s.omniregistry_future_entities_not_built_total == 1
+    assert "omnisim_expanded" not in s.omniregistry_divisions_active
+
+    text = studio_status.natural_language_status()
+    assert "2 active divisions" in text
+    assert "1 future/conceptual entities explicitly not built, not eligible for auto-start" in text
 
 
 def test_collect_reflects_real_backing_sources(monkeypatch, tmp_path):

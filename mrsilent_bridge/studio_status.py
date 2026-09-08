@@ -26,6 +26,7 @@ import failure_anomaly_discovery as fad
 import job_ledger
 import mission
 import omni_registry_stewardship as ors
+import omniregistry_manifest as orm
 import validation_canary_selfheal_discovery as vcs
 import work_graph
 
@@ -33,9 +34,20 @@ import work_graph
 @dataclass
 class StudioStatus:
     generated_at: str
-    # source 1: OmniRegistry divisions
+    # source 1: OmniRegistry divisions (omni_registry_stewardship.py's
+    # narrow, schema-fingerprinted, intake-eligible subset)
     registry_candidates_total: int
     registry_candidates_unclaimed: int
+    # source 1b (2026-09-08): the SEPARATE, larger canonical division
+    # manifest (omniregistry/registry.json) — visibility only, never
+    # intake-eligible; see omniregistry_manifest.py's own docstring for why
+    # these are two genuinely different registries, not a bug.
+    omniregistry_manifest_available: bool
+    omniregistry_manifest_total_entries: int
+    omniregistry_divisions_active: list[str]
+    omniregistry_projects_total: int
+    omniregistry_systems_total: int
+    omniregistry_future_entities_not_built_total: int
     # source 2: approval backlog
     approvals_pending_raw: int
     approvals_pending_real: int
@@ -82,6 +94,8 @@ def collect(*, anomaly_window_days: int = 1) -> StudioStatus:
     registry_candidates = ors.discover_candidate_entities()
     unclaimed = [c for c in registry_candidates if ors.already_has_any_campaign(c) is None]
 
+    manifest = orm.census()
+
     approval_report = abh.backlog_report()
 
     since = datetime.now(timezone.utc) - timedelta(days=anomaly_window_days)
@@ -122,6 +136,12 @@ def collect(*, anomaly_window_days: int = 1) -> StudioStatus:
         generated_at=datetime.now(timezone.utc).isoformat(),
         registry_candidates_total=len(registry_candidates),
         registry_candidates_unclaimed=len(unclaimed),
+        omniregistry_manifest_available=manifest is not None,
+        omniregistry_manifest_total_entries=manifest.total_entries if manifest else 0,
+        omniregistry_divisions_active=manifest.divisions_active if manifest else [],
+        omniregistry_projects_total=len(manifest.projects) if manifest else 0,
+        omniregistry_systems_total=len(manifest.systems) if manifest else 0,
+        omniregistry_future_entities_not_built_total=len(manifest.future_entities_not_built) if manifest else 0,
         approvals_pending_raw=approval_report.pending_total,
         approvals_pending_real=approval_report.pending_real,
         approvals_true_founder_gate=approval_report.true_founder_gate,
@@ -163,6 +183,13 @@ def natural_language_status(*, anomaly_window_days: int = 1) -> str:
         parts.append(f"{s.registry_candidates_unclaimed} registered Studio divisions are unclaimed and eligible for stewardship.")
     else:
         parts.append("No unclaimed registered Studio divisions right now — the registry's real work has already been picked up.")
+    if s.omniregistry_manifest_available:
+        parts.append(
+            f"Whole-Studio manifest: {len(s.omniregistry_divisions_active)} active divisions, "
+            f"{s.omniregistry_projects_total} projects, {s.omniregistry_systems_total} systems "
+            f"({s.omniregistry_future_entities_not_built_total} future/conceptual entities explicitly not built, "
+            "not eligible for auto-start)."
+        )
     parts.append(
         f"Approvals: {s.approvals_pending_real} real items need attention "
         f"({s.approvals_true_founder_gate} are genuine Founder gates), out of {s.approvals_pending_raw} raw pending "
