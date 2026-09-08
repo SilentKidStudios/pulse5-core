@@ -34,6 +34,10 @@ import work_graph as wg
 def _fresh(monkeypatch, tmp_path):
     monkeypatch.setattr(wg, "ITEMS_DIR", tmp_path / "items")
     monkeypatch.setattr(wg, "LOCKS_DIR", tmp_path / "locks")
+    # TEST_LIVE_STORE_CONTAMINATION fix (2026-09-08) — see
+    # test_proposal_work_bridge.py's identical fix for the real, live
+    # orphaned-marker evidence this closes.
+    monkeypatch.setattr(wg, "STATE_INDEX_DIR", tmp_path / "state_index")
     monkeypatch.setattr(so, "LEASES_DIR", tmp_path / "leases")
 
 

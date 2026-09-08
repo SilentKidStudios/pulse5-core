@@ -133,6 +133,7 @@ founder_gated) proposals:
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -215,6 +216,99 @@ class ImplementationOutcome:
     engineering_routing_reason: str = ""
 
 
+class TaskScopingAmbiguous(RuntimeError):
+    """PROPOSAL TASK-SCOPING FIDELITY REPAIR (2026-09-07): raised by
+    _build_task_text() when a proposal names a real source_paths target
+    but its own text gives contradictory or absent signal about whether
+    the intent is to REPAIR that existing target in place or to build a
+    genuinely new, additive component. Real, live, mechanically-verified
+    incident this closes: proposal 9e67d645-69de-40f9-824d-a7506b570774 /
+    job 9746cea9-449a-4f12-b358-8bfcd2818fca — the pre-repair unconditional
+    template asked Claude Code to "implement a small, self-contained
+    prototype" even though the proposal named a real target
+    (evolution/advance.py::_build_task_text() itself) and asked for a
+    repair, producing a disconnected advance_prototype.py instead of an
+    in-place fix. Per Founder instruction: "Fail closed... Do not silently
+    guess" — this exception is caught at the sole call site in
+    advance_one() and routed to a non-executable/blocked result via the
+    existing stage/blocked_reason machinery, never guessed past."""
+
+
+# Real, whole-word verb signals — deliberately generic (not tied to any one
+# proposal's wording) so this classifies future proposals, not just the
+# incident above. Scanned anywhere in observed_weakness+proposed_upgrade,
+# not just the leading word — a repair proposal's real weakness text often
+# opens with a file/function reference before the verb ("evolution/
+# advance.py::_build_task_text() ... needs to be fixed").
+#
+# Deliberately EXCLUDES generic verbs like "add"/"create"/"build"/
+# "implement" from BOTH lists — real repair proposals routinely say "add a
+# function to fix X" or "implement the missing check", so those verbs alone
+# are not a reliable repair-vs-new signal (verified against two real,
+# pre-existing frozen test fixtures with exactly this phrasing:
+# tests/test_authority_policy_negation_aware.py's 9266a13c fixture and
+# tests/test_th3_omni_router_integration.py's TH3 payload — both must keep
+# classifying the same way after this repair). _STRONG_NEW_ONLY_SIGNALS
+# below are phrase-level and deliberately narrow, so an incidental filename
+# mention (e.g. "produced omnivisual_prototype.py", describing a PAST bad
+# artifact) never false-triggers — only an explicit ask for a standalone/
+# scaffold/experimental artifact does.
+_REPAIR_INTENT_VERBS = (
+    "fix", "repair", "correct", "patch", "resolve", "address", "harden",
+    "wire", "integrate", "modify", "update", "change",
+)
+_STRONG_NEW_ONLY_SIGNALS = (
+    r"standalone (prototype|demo|script|file)",
+    r"\bscaffold\b",
+    r"\bexperiment(al)?\b",
+    r"\bthrowaway\b",
+    r"proof.of.concept",
+)
+
+_INTENT_REPAIR = "repair_existing"
+_INTENT_NEW_COMPONENT = "new_component"
+_INTENT_AMBIGUOUS = "ambiguous"
+
+# Matches a real "path.py::symbol_name(...)" style reference, exactly the
+# shape this project's own proposals already use to name an exact target
+# (see e.g. proposal 9e67d645's own observed_weakness text) — a strong,
+# structural (not word-choice-dependent) signal that the proposal names a
+# specific existing symbol to work on.
+_TARGET_SYMBOL_RE = re.compile(r"[\w./]+\.py::[\w]+\(\)")
+
+
+def _classify_task_intent(p: proposal_mod.Proposal) -> str:
+    """Pure classifier, no side effects. A proposal with no source_paths
+    has no existing target to repair at all -- always _INTENT_NEW_COMPONENT,
+    byte-for-byte the same classification (and therefore behavior) every
+    existing/automatic proposal already had before this repair, since
+    source_paths defaults to [] for the overwhelming majority.
+
+    When source_paths IS present, the structural signal (does the proposal
+    name an exact existing symbol via the path.py::symbol() pattern) and
+    the repair-verb signal both independently favor REPAIR — realistic
+    proposal text is discursive and rarely uses a single clean keyword, so
+    a strong, EXPLICIT "this should be a standalone/scaffold/experimental
+    artifact" phrase is required to override that and classify as a new
+    component. A proposal that names a real target but gives neither
+    signal at all is genuinely ambiguous -- fail closed rather than guess."""
+    if not p.source_paths:
+        return _INTENT_NEW_COMPONENT
+    text = f"{p.observed_weakness or ''} {p.proposed_upgrade or ''}"
+    text_lower = text.lower()
+    has_repair = any(re.search(rf"\b{v}\b", text_lower) for v in _REPAIR_INTENT_VERBS)
+    has_strong_new_only = any(re.search(pat, text_lower) for pat in _STRONG_NEW_ONLY_SIGNALS)
+    names_target_symbol = bool(_TARGET_SYMBOL_RE.search(text))
+
+    if has_strong_new_only and not has_repair and not names_target_symbol:
+        return _INTENT_NEW_COMPONENT
+    if has_repair or names_target_symbol:
+        if has_strong_new_only:
+            return _INTENT_AMBIGUOUS  # genuinely contradictory: names/repairs a target AND explicitly asks for a standalone artifact
+        return _INTENT_REPAIR
+    return _INTENT_AMBIGUOUS  # names a target but gives no signal at all about what to do with it -- never guess
+
+
 def _build_task_text(p: proposal_mod.Proposal) -> str:
     # GOD_MODE_V1 FINAL GAP CLOSURE: a proposal with explicit source_paths
     # (GOVERNED, authority-checked, context-staging-filtered -- see
@@ -235,6 +329,35 @@ def _build_task_text(p: proposal_mod.Proposal) -> str:
             "anywhere, and do not attempt to reference, open, or reason about files outside this "
             "directory (there are none available to you regardless)."
         )
+
+    intent = _classify_task_intent(p)
+
+    if intent == _INTENT_AMBIGUOUS:
+        raise TaskScopingAmbiguous(
+            f"proposal {p.proposal_id!r} names real source_paths={p.source_paths!r} but its "
+            "observed_weakness/proposed_upgrade text gives no clear, unambiguous signal of "
+            "repair-existing-source vs. build-a-new-component intent (both or neither verb class "
+            "matched) -- refusing to guess; refine the proposal's text to make intent explicit"
+        )
+
+    if intent == _INTENT_REPAIR:
+        symbol_match = _TARGET_SYMBOL_RE.search(f"{p.observed_weakness or ''} {p.proposed_upgrade or ''}")
+        target_symbol_line = f"Target symbol: {symbol_match.group(0)}\n" if symbol_match else ""
+        return (
+            f"You are REPAIRING existing canonical source code IN PLACE — this is NOT a request to "
+            f"build a new standalone prototype, demo, or scaffold file. {sandbox_note}\n\n"
+            f"Target file(s): {', '.join(p.source_paths)}\n"
+            f"{target_symbol_line}"
+            f"Observed weakness: {p.observed_weakness}\n"
+            f"Proposed upgrade: {p.proposed_upgrade}\n\n"
+            "Modify the staged, canonical target file(s) named above DIRECTLY, in place, to correct "
+            "the observed weakness. Do NOT create a new, separate, standalone file that merely "
+            "demonstrates or prototypes the fix — edit the real target file(s) so the actual defect "
+            "is corrected there. Preserve every other existing behavior of the target file(s) exactly "
+            "as-is; this is a bounded, targeted repair, not a rewrite. No comments explaining what you "
+            "did, just the working code."
+        )
+
     return (
         f"You are implementing a small, self-contained prototype for a proposed upgrade. {sandbox_note}\n\n"
         f"Observed weakness: {p.observed_weakness}\n"
@@ -256,6 +379,24 @@ def _eligible(p: proposal_mod.Proposal) -> tuple[bool, str]:
     if p.risk_score == "low":
         pass
     elif p.risk_score == "founder_gated":
+        # PROPOSAL COMPLETENESS GATE (2026-09-07): a founder_gated proposal
+        # that is not yet decision-ready (evolution/proposal.py::
+        # proposal_completeness()) is checked BEFORE the Founder-approval
+        # check below — deliberately never reaches "awaiting explicit
+        # Founder review" at all, since there is nothing yet for a Founder
+        # to meaningfully review (real example: 8d0d01cb-d2f5-4638-b5f5-
+        # 3b3945de07bf, which deliberately declares no scope). Scoped
+        # narrowly to founder_gated only — the existing risk_score=='low'
+        # lane above is completely untouched, so nothing about its proven
+        # "safe to run unattended" doctrine (authority_policy.classify(),
+        # validation.py, independent canary, sandboxed-only writes — see
+        # this module's own top docstring) changes for any proposal that
+        # predates this field set and was already relying on that lane.
+        complete, missing = proposal_mod.proposal_completeness(p)
+        if not complete:
+            return False, (f"risk_score='founder_gated' but proposal_id={p.proposal_id!r} is not yet "
+                            f"decision-ready — missing: {', '.join(missing)} — never surfaced to the Founder "
+                            f"and never auto-advanced until refined (see evolution/proposal.py::refine())")
         decision = founder_request.exact_proposal_decision(p.proposal_id)
         if decision == "approved":
             pass
@@ -289,7 +430,115 @@ def _load_job_result_from_disk(job_id: str) -> SimpleNamespace | None:
         job_id=data.get("job_id", job_id), status=data.get("status"),
         workdir=data.get("workdir"), files_changed=data.get("files_changed", {}),
         promotion_eligible=data.get("promotion_eligible", False),
+        adapter=data.get("adapter"),
     )
+
+
+def reconcile_orphaned_canary(proposal_id: str) -> AdvancementResult:
+    """CANARY_RECONCILIATION gap-closure (2026-09-08): resumes a proposal
+    that crashed or was interrupted AFTER its canary passed but BEFORE
+    advance_one() reached PROMOTION_CANDIDATE — real, live evidence:
+    proposals 83c43e59-fcfb-4b3f-ab0c-29f2dba8d17b and c3b3c10a-dabf-4b92-
+    923b-6039cbb67ad3, both orphaned at status=canary since 2026-08-20 /
+    2026-09-01 respectively, both correctly parked in BLOCKED_FOUNDER
+    (source="orphaned_status", see proposal_work_bridge.py) but never
+    actually resolved (see that fix's own docstring: "needs a human to look
+    at it (resume/reset the proposal, or promote it)" — this is that
+    resume).
+
+    WHY ONLY status==CANARY IS SAFE TO RESUME, never any other orphaned
+    status: ProposalStatus.CANARY is written by advance_one() at EXACTLY
+    ONE call site (the `if not canary.passed: ... return _finish(...)`
+    guard immediately above it means a FAILED canary never reaches that
+    line at all — it leaves the proposal at TESTED instead, never at
+    CANARY). So status==CANARY is, by construction, always a genuine PASS,
+    durably recorded — never a failure "masquerading" as one. A proposal
+    orphaned at IMPLEMENTED or TESTED is a DIFFERENT, unresolved case (its
+    test/canary step never definitively finished) and is deliberately left
+    alone here — resuming it would mean re-running validation/canary,
+    which is not "reconciling a known-good result", it's re-attempting an
+    unfinished one, and stays in BLOCKED_FOUNDER/orphaned_status for actual
+    human review, exactly as today.
+
+    Performs ONLY the un-crashed tail of advance_one()'s CANARY branch —
+    advancing straight to PROMOTION_CANDIDATE and (re-)issuing the Founder
+    communication request — never re-implementing, re-testing, or
+    re-canarying (no duplicate dispatch; the existing implementation_job_id
+    is reused exactly as-is). Deliberately skips the optional Phase U local
+    second-opinion review that the live pipeline also runs at this point:
+    that step is itself best-effort/non-blocking there (wrapped in its own
+    try/except, never gates PROMOTION_CANDIDATE) and skipping it here keeps
+    this reconciliation narrow and dependency-light rather than replaying a
+    step that was never guaranteed to run anyway.
+
+    Idempotent and crash-safe: a proposal not currently at status==CANARY
+    (never reached it, already reconciled, or genuinely still at TESTED
+    after a failed canary) is a pure no-op — this NEVER mutates risk_score,
+    NEVER fabricates a Founder approval/denial, and NEVER performs the
+    actual promotion (still a separate, human-run `cli.py promote ...
+    --founder-approved`). Safe to call repeatedly, from multiple cycles or
+    processes: the only durable writes are the same single-file
+    proposal_mod.advance() and the already-deduplicated
+    founder_request.request_founder_decision(), both idempotent on retry.
+    """
+    p = proposal_mod.load(proposal_id)
+    if p.status != proposal_mod.ProposalStatus.CANARY:
+        return AdvancementResult(
+            proposal_id=p.proposal_id, final_status=p.status, stages=[],
+            implementation_job_id=p.implementation_job_id,
+            blocked_reason="not_orphaned_at_canary", selected_engine=None,
+            attempt_number=p.implementation_attempts,
+        )
+    last = p.history[-1] if p.history else {}
+    if last.get("status") != proposal_mod.ProposalStatus.CANARY or "canary passed" not in (last.get("note") or ""):
+        # Belt-and-suspenders: the bare status label alone is trusted
+        # nowhere else in this module either — never resume a canary this
+        # function cannot itself verify actually passed.
+        return AdvancementResult(
+            proposal_id=p.proposal_id, final_status=p.status, stages=[],
+            implementation_job_id=p.implementation_job_id,
+            blocked_reason="canary_status_unverified", selected_engine=None,
+            attempt_number=p.implementation_attempts,
+        )
+    if not p.implementation_job_id:
+        return AdvancementResult(
+            proposal_id=p.proposal_id, final_status=p.status, stages=[],
+            implementation_job_id=None, blocked_reason="no_implementation_job_on_record",
+            selected_engine=None, attempt_number=p.implementation_attempts,
+        )
+    job = _load_job_result_from_disk(p.implementation_job_id)
+    if job is None or job.status != "succeeded":
+        return AdvancementResult(
+            proposal_id=p.proposal_id, final_status=p.status, stages=[],
+            implementation_job_id=p.implementation_job_id,
+            blocked_reason="implementation_job_result_missing_or_not_succeeded",
+            selected_engine=None, attempt_number=p.implementation_attempts,
+        )
+
+    stages = [StageEvent("reconciliation", "ok",
+                          f"resumed from orphaned canary (crash/interrupt after canary passed, "
+                          f"{last.get('at')}); skipped re-implementation/re-test/re-canary; "
+                          f"reusing job {job.job_id}")]
+    p = proposal_mod.advance(
+        p.proposal_id, proposal_mod.ProposalStatus.PROMOTION_CANDIDATE,
+        note=f"reconciled from orphaned canary: ready for human-directed promotion, "
+             f"implemented via {job.adapter}, sandbox at {job.workdir}, "
+             f"run `cli.py promote {job.job_id} --target <path> --founder-approved` to actually promote",
+    )
+    stages.append(StageEvent("promotion_candidate", "ok",
+                              "awaiting human-chosen target + --founder-approved; nothing promoted"))
+    try:
+        founder_request.request_founder_decision(
+            subject=f"proposal {p.proposal_id}", finding=p.observed_weakness,
+            capability_needed="production_promotion",
+            reason_required="writing outside a job sandbox into /opt/pulse5-core is always founder-gated, regardless of risk_class",
+            recommended_action=f"promote job {job.job_id} (implemented via {job.adapter}) to a real path",
+            risk=p.risk_score, affected={"proposal_id": p.proposal_id, "job_id": job.job_id, "files_changed": job.files_changed},
+            rollback_recovery="promotion.py backs up any overwritten file before writing; rollback(promotion_id) reverses a granted promotion",
+        )
+    except Exception as e:  # noqa: BLE001 — an optional communication step must never break reconciliation
+        stages.append(StageEvent("founder_communication", "error", f"{type(e).__name__}: {e}"))
+    return _finish(p, stages, job.job_id, None, None, job.adapter)
 
 
 def _job_terminal_status(job_id: str) -> tuple[str, job_ledger.LedgerRecord | None, RecoveryPolicy | None]:
@@ -451,6 +700,23 @@ def run_local_static_validation(target_dir: str, *, requested_by: str, files_cha
             "skipped": result.skipped, "engine": "local_static_validation"}
 
 
+def _validation_config_for_proposal(p: proposal_mod.Proposal) -> dict[str, Any]:
+    """VALIDATION/CANARY SEMANTICS REPAIR (2026-09-07): real, live,
+    mechanically-verified incident this closes — job 9746cea9-449a-4f12-
+    b358-8bfcd2818fca reached promotion_candidate with primary validation
+    and canary BOTH vacuously "passing" purely because validation.
+    check_tests() found no test_*.py file in the sandbox and silently
+    skipped rather than failing, even though the proposal's own
+    validation_plan explicitly declared behavioral tests were the
+    acceptance bar. A proposal that never declared a validation_plan (the
+    overwhelming majority of existing/historical proposals, which predate
+    the completeness-gate schema) gets require_tests=False here -- BYTE-
+    FOR-BYTE the same behavior as before this repair, config=None in every
+    respect that matters to validation.validate(). Only a proposal that
+    HONESTLY declared its own validation_plan gets held to it."""
+    return {"require_tests": bool(p.validation_plan)}
+
+
 def _run_omni_engineer(task_text: str, requested_by: str, proposal_id: str) -> tuple[EngineAttempt, Any]:
     # ROUTER_INTEGRATION (Phase 3): submit_job_auto() classifies task_text
     # complexity inside the Omni capability boundary and dispatches to
@@ -476,6 +742,7 @@ def _run_omni_engineer(task_text: str, requested_by: str, proposal_id: str) -> t
         task=task_text, requested_by=requested_by,
         timeout_s=OMNI_IMPLEMENT_TIMEOUT_S, founder_approved=False,
         source_paths=p.source_paths or None,
+        validation_config=_validation_config_for_proposal(p),
         on_job_created=lambda jid: proposal_mod.append_implementation_job(
             proposal_id, jid, engine="omni_engineer", note="job created (linked before execution)"),
     )
@@ -568,6 +835,7 @@ def _run_claude_code(task_text: str, requested_by: str, proposal_id: str) -> tup
     job = bridge.submit_job(
         task=task_text, requested_by=requested_by, tools=IMPLEMENT_TOOLS, source_paths=p.source_paths or None,
         timeout_s=IMPLEMENT_TIMEOUT_S, founder_approved=False,
+        validation_config=_validation_config_for_proposal(p),
         on_job_created=lambda jid: proposal_mod.append_implementation_job(
             proposal_id, jid, engine="claude_code", note="job created (linked before execution)"),
     )
@@ -884,7 +1152,18 @@ def advance_one(proposal_id: str, *, requested_by: str = "autonomous_pipeline") 
                     evidence={"implementation_job_ids": p.implementation_job_ids})
                 return _finish(p, stages, p.implementation_job_id, "bounded_attempts_exceeded", None, "n/a")
 
-            task_text = _build_task_text(p)
+            try:
+                task_text = _build_task_text(p)
+            except TaskScopingAmbiguous as e:
+                # Fail closed, never guess: the proposal stays PROPOSED
+                # (never REJECTED, never IMPLEMENTED) and is eligible for a
+                # later attempt once its text is refined to make intent
+                # unambiguous -- exactly the existing "controlled
+                # escalation, not permanent rejection" pattern this module
+                # already uses elsewhere.
+                stages.append(StageEvent("task_scoping", "blocked", str(e)))
+                return _finish(p, stages, p.implementation_job_id, "ambiguous_task_scoping", None, "n/a")
+
             impl = _implementation_router(task_text, requested_by, proposal_id,
                                            allow_paid=getattr(p, "paid_resources_allowed", True))
             stages.append(StageEvent("implementation_router", "blocked" if impl.terminal_reject else "ok",
@@ -983,18 +1262,42 @@ def advance_one(proposal_id: str, *, requested_by: str = "autonomous_pipeline") 
 
         # CANARY — independent second pass over the SAME sandbox content, run
         # unconditionally regardless of whether `job` was fresh/resumed/reused.
-        canary = validation.validate(Path(job.workdir), job.files_changed, config=None)
+        #
+        # CANARY SEMANTICS REPAIR (2026-09-07): canary_required is driven by
+        # the proposal's OWN declared canary_plan (a completeness-gate
+        # field) — a proposal that never declared one (the overwhelming
+        # majority of existing/historical proposals) gets CANARY_NOT_REQUIRED,
+        # byte-for-byte the same config=None behavior as before this repair.
+        # Only a proposal that explicitly committed to a canary_plan is held
+        # to it, and that commitment now actually forces real test execution
+        # (see _validation_config_for_proposal()/validation.check_tests())
+        # rather than a vacuous pass from an empty/no-op check.
+        canary_required = bool(p.canary_plan)
+        canary_config = {"require_tests": canary_required} if canary_required else None
+        canary = validation.validate(Path(job.workdir), job.files_changed, config=canary_config)
+        # Preserved EXACTLY as before this repair: ANY failing check blocks
+        # promotion, required or not — canary_required only changes what
+        # check_tests() is willing to require, never whether a real failure
+        # (compile error, sandbox-boundary violation, etc.) blocks.
+        if canary_required:
+            canary_state = "CANARY_REQUIRED_AND_PASS" if canary.passed else "CANARY_REQUIRED_AND_FAIL"
+        else:
+            canary_state = "CANARY_NOT_REQUIRED" if canary.passed else "CANARY_NOT_REQUIRED_BUT_FAILED"
         if not canary.passed:
-            stages.append(StageEvent("canary", "blocked", "independent re-validation did not reproduce PASS"))
+            stages.append(StageEvent("canary", "blocked",
+                                      f"independent re-validation did not reproduce PASS ({canary_state})"))
             p = proposal_mod.advance(p.proposal_id, proposal_mod.ProposalStatus.REJECTED,
-                                      note="auto-advance halted: canary re-validation failed (drift/non-determinism)")
+                                      note=f"auto-advance halted: canary re-validation failed ({canary_state}: "
+                                           "drift/non-determinism, or the declared canary_plan's behavioral bar "
+                                           "was not met)")
             _escalate_if_unresolved_self_correction(
                 p, reason="canary (independent re-validation) failed to reproduce the initial PASS",
-                evidence={"implementation_job_id": job.job_id, "selected_engine": selected_engine_label})
+                evidence={"implementation_job_id": job.job_id, "selected_engine": selected_engine_label,
+                          "canary_state": canary_state})
             return _finish(p, stages, job.job_id, "canary failed", impl, selected_engine_label)
 
-        stages.append(StageEvent("canary", "ok", "independent re-validation confirmed PASS"))
-        p = proposal_mod.advance(p.proposal_id, proposal_mod.ProposalStatus.CANARY, note="canary passed")
+        stages.append(StageEvent("canary", "ok", f"independent re-validation confirmed PASS ({canary_state})"))
+        p = proposal_mod.advance(p.proposal_id, proposal_mod.ProposalStatus.CANARY, note=f"canary passed ({canary_state})")
 
         # Phase U — bounded local second-opinion review. Only fires on a
         # real trigger (needs_second_opinion), never for every job. Never

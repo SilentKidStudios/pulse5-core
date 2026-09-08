@@ -17,6 +17,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 PROPOSALS_DIR = Path(__file__).resolve().parent / "proposals"
 LESSONS_PATH = Path(__file__).resolve().parent / "lessons.jsonl"
@@ -68,6 +69,35 @@ class Proposal:
     # specific files) gets anything staged at all. Still subject to the SAME
     # authority_policy.GATED_PATH_MARKERS check and the context-staging default-exclusion
     # filter as submit_job()/submit_job_decomposed() already apply.
+
+    # --- PROPOSAL COMPLETENESS GATE (2026-09-07) --------------------------
+    # Every field below defaults to None (never False/""), deliberately —
+    # None means "not yet declared" and is treated as MISSING by
+    # proposal_completeness() below; only an EXPLICIT value (including an
+    # explicit False) counts as answered. This is what lets the gate tell
+    # "nobody has said yet" apart from "the answer is no", which a False/""
+    # default could never distinguish. None of these fields is read by any
+    # PRE-EXISTING code path (advance.py's core low-risk lane, the engine
+    # runners, promotion.py) — they are additive schema only, consumed
+    # exclusively by proposal_completeness()/auto_execute_eligible() below
+    # and by evolution/advance.py::_eligible()'s new founder_gated
+    # completeness check. A proposal created before this field set existed
+    # simply has every one of these at None, i.e. "not decision-ready" —
+    # which is the CORRECT, safe classification for a proposal nobody ever
+    # explicitly scoped this way, not a regression of anything that used to
+    # work (see this field set's docstring on evolution/advance.py::
+    # _eligible() for exactly which existing behavior stays untouched).
+    implementation_scope: str | None = None       # exact bounded implementation scope
+    non_file_scope: str | None = None              # explicit non-file scope, when source_paths is deliberately empty
+    validation_plan: str | None = None
+    canary_plan: str | None = None
+    paid_resources_required: bool | None = None
+    credential_changes_required: bool | None = None
+    production_promotion_required: bool | None = None
+    destructive_action_required: bool | None = None
+    model_change_required: bool | None = None
+    isolation_change_required: bool | None = None
+    campaign_collision: bool | None = None
 
 
 # Event-driven pickup wake signal (mrsilent-autonomous-cycle.path watches
@@ -221,6 +251,135 @@ def advance(proposal_id: str, new_status: str, note: str = "") -> Proposal:
     p.status = new_status
     p.history.append({"at": datetime.now(timezone.utc).isoformat(), "event": "advanced", "status": new_status, "note": note})
     save(p)
+    return p
+
+
+# --- PROPOSAL COMPLETENESS GATE (2026-09-07) -------------------------------
+#
+# PROBLEM: an incomplete, deliberately-unscoped founder_gated proposal (the
+# real, live example: 8d0d01cb-d2f5-4638-b5f5-3b3945de07bf, whose own
+# proposed_upgrade text says "this proposal deliberately does not scope
+# itself") reached the exact same Founder-visible blocked_founder queue as a
+# genuine, reviewable decision — with no scope, no validation plan, no canary
+# plan, and only a default (never explicitly declared) paid_resources_allowed
+# ceiling. There was never a mechanism to keep a proposal in that state OUT
+# of Founder review until it actually has something reviewable in it.
+#
+# FIX, deliberately narrow: a proposal becomes "decision-ready" only when
+# EVERY field in DECISION_READY_FIELDS below is explicitly populated (never
+# inferred, never defaulted-to-pass). This is a pure, read-only classifier —
+# it never mutates a proposal and never decides FOR the Founder; it only
+# decides whether a proposal is legible enough to be worth putting in front
+# of the Founder (or, for the separate, stricter auto_execute_eligible()
+# tier below, worth ever executing without one). See evolution/advance.py::
+# _eligible() and proposal_work_bridge.py::_founder_gate_state() for where
+# this is actually consumed.
+DECISION_READY_FIELDS = (
+    "observed_weakness", "proposed_upgrade", "implementation_scope",
+    "validation_plan", "canary_plan",
+    "paid_resources_required", "credential_changes_required",
+    "production_promotion_required", "destructive_action_required",
+    "model_change_required", "isolation_change_required", "campaign_collision",
+)  # + a 13th, structural, requirement checked separately below: source_paths
+   # OR non_file_scope must say SOMETHING about affected components/files.
+
+
+def _is_blank_text(v: Any) -> bool:
+    return not isinstance(v, str) or not v.strip()
+
+
+def proposal_completeness(p: "Proposal") -> tuple[bool, list[str]]:
+    """Returns (is_decision_ready, missing_field_names). Pure/read-only —
+    never mutates `p`, never raises for a malformed/legacy proposal (missing
+    fields are exactly what this reports, not an error). A field is
+    "present" only when EXPLICITLY set: a blank/whitespace-only string is
+    treated as missing for the text fields, and None (never False) is
+    treated as missing for the protected-action booleans — an explicit
+    False is a real, complete answer, exactly as required."""
+    missing: list[str] = []
+    for name in DECISION_READY_FIELDS:
+        value = getattr(p, name, None)
+        if name in ("observed_weakness", "proposed_upgrade", "implementation_scope",
+                     "validation_plan", "canary_plan"):
+            if _is_blank_text(value):
+                missing.append(name)
+        else:  # the protected-action / paid-resource booleans
+            if value is None:
+                missing.append(name)
+    if not p.source_paths and _is_blank_text(p.non_file_scope):
+        missing.append("affected_components_or_non_file_scope")
+    return (len(missing) == 0), missing
+
+
+def is_decision_ready(p: "Proposal") -> bool:
+    return proposal_completeness(p)[0]
+
+
+# --- AUTO_EXECUTE_ELIGIBLE tier (2026-09-07) --------------------------------
+#
+# A SEPARATE, STRICTER, ADDITIVE check — this function is NOT wired into
+# evolution/advance.py::_eligible()'s existing risk_score=='low' lane (that
+# lane's own proven safety doctrine — authority_policy.classify(),
+# validation.validate(), independent canary, sandboxed-only writes — is
+# UNCHANGED and untouched; see _eligible()'s docstring). This function exists
+# for a caller (e.g. a future bounded delegated-autonomy entry point) that
+# wants a STRICTER bar than plain risk_score=='low': decision-ready AND every
+# protected-action flag explicitly declared False. Never loosens anything;
+# only ever narrows which proposals a stricter caller is willing to treat as
+# eligible for delegated autonomous execution.
+def auto_execute_eligible(p: "Proposal") -> tuple[bool, list[str]]:
+    """Returns (eligible, reasons_if_not). ALL of the following must hold:
+      - risk_score == 'low' (ordinary/non-protected work, per this
+        codebase's existing risk classification)
+      - decision-ready (see proposal_completeness())
+      - every protected-action boolean explicitly False (paid resources,
+        credential changes, production promotion, destructive action, model
+        change, isolation change, campaign collision)
+    Never mutates anything; never grants execution itself — it only answers
+    the yes/no question for whoever calls it."""
+    reasons: list[str] = []
+    if p.risk_score != "low":
+        reasons.append(f"risk_score={p.risk_score!r} is not 'low' — ordinary/non-protected work only")
+    complete, missing = proposal_completeness(p)
+    if not complete:
+        reasons.append(f"not decision-ready — missing: {', '.join(missing)}")
+    protected_flags = (
+        "paid_resources_required", "credential_changes_required", "production_promotion_required",
+        "destructive_action_required", "model_change_required", "isolation_change_required",
+        "campaign_collision",
+    )
+    for name in protected_flags:
+        value = getattr(p, name, None)
+        if value is not False:
+            reasons.append(f"{name}={value!r} — must be explicitly False for delegated autonomy")
+    return (len(reasons) == 0), reasons
+
+
+def refine(proposal_id: str, *, note: str = "", **fields: Any) -> Proposal:
+    """The REFINE step: mechanically sets one or more of the decision-ready
+    fields on an existing proposal (never creates a second proposal, never
+    touches risk_score/status/fingerprint/provenance) and records exactly
+    what changed on the proposal's own history. Rejects any kwarg that isn't
+    a real completeness-gate field — this is a narrow, mechanical setter,
+    never a place to sneak in an unrelated mutation. Callers are responsible
+    for supplying only real, canonical values — refine() itself has no way
+    to verify truthfulness, only to record explicit answers precisely
+    (never inventing scope/plans that were not actually provided)."""
+    allowed = set(DECISION_READY_FIELDS) | {"non_file_scope"}
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError(f"refine() only accepts completeness-gate fields; unknown: {sorted(unknown)}")
+    p = load(proposal_id)
+    changed: dict[str, Any] = {}
+    for name, value in fields.items():
+        old = getattr(p, name)
+        if old != value:
+            setattr(p, name, value)
+            changed[name] = value
+    if changed:
+        p.history.append({"at": datetime.now(timezone.utc).isoformat(), "event": "refined",
+                           "changed_fields": sorted(changed), "note": note})
+        save(p)
     return p
 
 

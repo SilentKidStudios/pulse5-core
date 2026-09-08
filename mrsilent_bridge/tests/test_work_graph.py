@@ -16,6 +16,18 @@ import work_graph as wg
 def _fresh(monkeypatch, tmp_path):
     monkeypatch.setattr(wg, "ITEMS_DIR", tmp_path / "items")
     monkeypatch.setattr(wg, "LOCKS_DIR", tmp_path / "locks")
+    # TEST_LIVE_STORE_CONTAMINATION fix (2026-09-08): STATE_INDEX_DIR is a
+    # THIRD WORK_GRAPH_ROOT-derived sibling of ITEMS_DIR/LOCKS_DIR (added
+    # after this fixture existed), and was never added here — every state
+    # transition this file's tests exercise (mark_repairable_failed(),
+    # claim(), etc.) was writing real zero-byte marker files straight into
+    # the LIVE production work_graph_state/state_index/ tree even though
+    # the item itself only ever existed under tmp_path, leaving permanent
+    # orphaned entries with no backing item or proposal (real, live
+    # evidence: proposal:990a3392-ec3b-491d-9d15-5b6b45d6713d and
+    # proposal:d2f4c2e7-afe4-490a-819a-503765da359c, both dangling
+    # REPAIRABLE_FAILED index markers with zero corresponding data).
+    monkeypatch.setattr(wg, "STATE_INDEX_DIR", tmp_path / "state_index")
 
 
 def test_create_without_dependencies_is_runnable(monkeypatch, tmp_path):

@@ -433,11 +433,25 @@ def recursive_depth(work_id: str, *, _seen: set[str] | None = None) -> int:
 
 # ---- state transitions -------------------------------------------------------
 
-def mark_blocked_founder(work_id: str, *, note: str = "") -> WorkItem:
+def mark_blocked_founder(work_id: str, *, note: str = "", source: str = "founder_gate") -> WorkItem:
+    """`source` records WHY this item is BLOCKED_FOUNDER, since the state
+    alone conflates two very different situations: a genuine, resolvable
+    founder-gate decision (source="founder_gate", the only case proposal_
+    work_bridge.py itself ever marks this way) versus an ESCALATION — a
+    repair-budget exhaustion (see retry_repairable_failed(), which sets
+    this directly) or an orphaned mid-flight proposal status (see
+    proposal_work_bridge.py's ORPHANED_STATUS check) — neither of which has
+    anything to do with this proposal's own founder-gate/decision state.
+    Only proposal_work_bridge.py's release branch reads this field, to
+    decide whether re-evaluating the founder-gate check alone is a safe
+    reason to auto-release (see its own docstring for the real incident
+    this closed: proposals 83c43e59.../c3b3c10a... churned BLOCKED_FOUNDER
+    -> auto-released -> re-dispatched -> identical failure, forever)."""
     record = load(work_id)
     if record is None:
         raise ValueError(f"no work item {work_id!r}")
     record.state = WorkState.BLOCKED_FOUNDER
+    record.provenance = {**record.provenance, "blocked_founder_source": source}
     return _save(record, note=note or "blocked on Founder gate")
 
 
@@ -543,6 +557,12 @@ def retry_repairable_failed() -> list[str]:
             continue
         if record.repair_attempts >= MAX_REPAIR_ATTEMPTS:
             record.state = WorkState.BLOCKED_FOUNDER
+            # see mark_blocked_founder()'s `source` docstring: this is an
+            # escalation, never a founder-gate decision — must not be
+            # auto-released by proposal_work_bridge.py's release branch
+            # merely because THIS proposal's own risk_score/decision is
+            # unrelated to why it's here.
+            record.provenance = {**record.provenance, "blocked_founder_source": "repair_budget_exhausted"}
             _save(record, note=f"repair budget exhausted ({record.repair_attempts} attempts) — escalated to Founder")
             continue
         record.repair_attempts += 1

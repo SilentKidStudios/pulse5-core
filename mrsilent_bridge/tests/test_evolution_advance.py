@@ -43,10 +43,15 @@ FAILURES: list[str] = []
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
+    # PYTEST_TRUTHFULNESS gap-closure (2026-09-06) — a print-and-record-only
+    # check() makes pytest report every collected test in this file as
+    # "passed" regardless of what check() actually found. The assert below
+    # makes pytest and the plain `python3 <file>.py` __main__ runner agree.
     status = "PASS" if condition else "FAIL"
     print(f"[{status}] {name}" + (f" — {detail}" if detail and not condition else ""))
     if not condition:
         FAILURES.append(name)
+    assert condition, f"{name}" + (f" — {detail}" if detail else "")
 
 
 @dataclass
@@ -282,7 +287,14 @@ def test_promotion_still_requires_founder_approved() -> None:
         advance._ENGINE_RUNNERS["claude_code"] = original_claude
 
     check("reaches promotion_candidate", result.final_status == "promotion_candidate", result.final_status)
-    record = promotion.promote(result.implementation_job_id, "/opt/pulse5-core/_never_written_by_test", founder_approved=False)
+    # Portable target: promotion.PULSE5_ROOT is computed relative to wherever
+    # promotion.py itself actually resolves from (worktree or live) — a
+    # hardcoded "/opt/pulse5-core/..." here would spuriously trip
+    # _validate_target()'s "target_root is outside PULSE5_ROOT" hard block
+    # when run against a worktree checkout (2026-09-06 test-portability fix,
+    # same class of bug as SANDBOX in test_authority_policy_negation_aware.py).
+    never_written_target = str(promotion.PULSE5_ROOT / "_never_written_by_test")
+    record = promotion.promote(result.implementation_job_id, never_written_target, founder_approved=False)
     check("promotion without --founder-approved stays a dry_run and writes nothing",
           record.approval_state == "dry_run", record.approval_state)
     _cleanup(p.proposal_id, "synthetic promotion-gate test — cleaned up per test-artifact policy")
@@ -514,7 +526,8 @@ def test_run_claude_code_threads_proposal_source_paths_to_bridge_submit_job() ->
     captured = {}
     original_submit_job = advance.bridge.submit_job
 
-    def fake_submit_job(*, task, requested_by, tools, source_paths, timeout_s, founder_approved, on_job_created=None):
+    def fake_submit_job(*, task, requested_by, tools, source_paths, timeout_s, founder_approved,
+                         validation_config=None, on_job_created=None):
         captured["source_paths"] = source_paths
         if on_job_created:
             on_job_created("fake-job-id-source-paths-wiring-test")
@@ -546,7 +559,8 @@ def test_run_claude_code_passes_none_when_proposal_has_no_source_paths() -> None
     captured = {}
     original_submit_job = advance.bridge.submit_job
 
-    def fake_submit_job(*, task, requested_by, tools, source_paths, timeout_s, founder_approved, on_job_created=None):
+    def fake_submit_job(*, task, requested_by, tools, source_paths, timeout_s, founder_approved,
+                         validation_config=None, on_job_created=None):
         captured["source_paths"] = source_paths
         if on_job_created:
             on_job_created("fake-job-id-no-source-paths-test")

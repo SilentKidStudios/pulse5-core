@@ -289,10 +289,31 @@ def _clear_stale_test_caches(sandbox: Path) -> None:
 
 
 def check_tests(sandbox: Path, _files_changed: dict, config: dict) -> CheckResult | None:
+    # VALIDATION SEMANTICS REPAIR (2026-09-07): real, live, mechanically-
+    # verified incident this closes — job 9746cea9-449a-4f12-b358-
+    # 8bfcd2818fca reached promotion_candidate purely because this function
+    # returned None (a SKIP, not a failure) when its sandbox contained no
+    # test_*.py/*_test.py file, and validate()'s own `passed = all(c.passed
+    # for c in checks)` is vacuously True when nothing ran. That was always
+    # correct behavior for a proposal that never promised behavioral tests
+    # (the overwhelming majority — config.get("require_tests") defaults
+    # False here, byte-for-byte the same skip-on-no-tests behavior as
+    # before this repair). It is NOT correct for a proposal whose own
+    # validation_plan explicitly declared tests as the acceptance bar — see
+    # evolution/advance.py::_validation_config_for_proposal(). For that
+    # case, "no test file exists" must be a FAILING result, not a skip.
     if config.get("run_tests", True) is False:
         return None
     has_tests = any(sandbox.rglob("test_*.py")) or any(sandbox.rglob("*_test.py"))
     if not has_tests:
+        if config.get("require_tests"):
+            return CheckResult(
+                "test_discovery_and_run", False,
+                "behavioral test execution is required by this proposal's own declared validation "
+                "contract, but no test_*.py/*_test.py file exists anywhere in the sandbox — a missing "
+                "required behavioral test is a failure, never a silent pass",
+                0.0,
+            )
         return None
     _clear_stale_test_caches(sandbox)
     t0 = time.monotonic()
