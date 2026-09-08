@@ -168,6 +168,10 @@ def _index_mark_state(work_id: str, state: str, *, clear_others: bool = True) ->
         pass
 
 
+def _index_built_marker() -> Path:
+    return STATE_INDEX_DIR / ".built"
+
+
 def rebuild_state_index() -> dict[str, int]:
     """One-time (or ad-hoc repair) full rebuild of STATE_INDEX_DIR from the
     real, authoritative ITEMS_DIR — the only place this module ever does a
@@ -175,7 +179,20 @@ def rebuild_state_index() -> dict[str, int]:
     population that existed before this index existed (or an index that
     somehow drifted) gets a trustworthy index without ever guessing.
     Idempotent and safe to run any time; wipes and rewrites the whole
-    index directory from ground truth. Returns {state: count}."""
+    index directory from ground truth. Returns {state: count}.
+
+    Writes a '.built' sentinel on success — see _indexed_runnable_
+    candidates()'s own docstring for the real bug this closed (2026-09-08):
+    create()/_save() alone create ONLY the specific state subdirectory an
+    item is currently in, so a state with zero current members (e.g. no
+    item has ever been BLOCKED_EXTERNAL_SESSION) never gets a directory at
+    all — checking 'does every relevant subdirectory exist' as the trust
+    signal made the index silently untrustworthy (permanent full-scan
+    fallback) in that common, real case. The sentinel is the correct
+    signal instead: it means 'every item that existed at rebuild time is
+    accounted for, and every write since has incrementally maintained
+    that' — at which point an ABSENT state subdirectory is trustworthy
+    ground truth ('zero items', not 'never indexed')."""
     import shutil
     if STATE_INDEX_DIR.exists():
         shutil.rmtree(STATE_INDEX_DIR)
@@ -183,6 +200,8 @@ def rebuild_state_index() -> dict[str, int]:
     for record in list_all():
         _index_mark_state(record.work_id, record.state, clear_others=False)  # directory just wiped above
         counts[record.state] = counts.get(record.state, 0) + 1
+    STATE_INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    _index_built_marker().write_text(_now())
     return counts
 
 
@@ -657,25 +676,30 @@ def _indexed_runnable_candidates() -> list[WorkItem] | None:
     about) via a plain directory listing — O(items in those two states),
     never O(total population) — then load()s just those specific items.
 
-    Returns None (never a guess) whenever the index cannot be trusted,
-    so the caller falls back to the original full list_all() scan:
-      - the index directory doesn't exist yet (pre-index population, or
-        rebuild_state_index() never run) — a fresh deployment must not
-        silently believe 'nothing is runnable' just because no marker
-        files exist yet.
-      - EITHER relevant state subdirectory is itself missing — same
-        reasoning: absence of the directory means 'never indexed', not
-        'genuinely zero items', and those are different facts this
-        function must never conflate.
-    A marker whose underlying item no longer loads (deleted/corrupt) is
-    silently skipped — the SAME fail-safe list_all() itself already
-    applies to a corrupt item file, not a new risk this introduces."""
+    Returns None (never a guess) whenever the index cannot be trusted, so
+    the caller falls back to the original full list_all() scan: ONLY when
+    rebuild_state_index()'s own '.built' sentinel is absent (see that
+    function's docstring for the real bug this fixes — 2026-09-08:
+    requiring EVERY relevant subdirectory to individually exist was wrong,
+    since create()/_save() alone never create a directory for a state with
+    zero current members, e.g. a system where nothing has ever been
+    BLOCKED_EXTERNAL_SESSION — that made the index permanently distrust
+    itself, silently falling back to full-scan forever, in exactly the
+    common case this fix exists to speed up). Once the sentinel exists, a
+    missing state subdirectory correctly means 'zero items in that state
+    right now', not 'never indexed' — the two are different facts, and the
+    sentinel is what lets this function tell them apart. A marker whose
+    underlying item no longer loads (deleted/corrupt) is silently skipped
+    — the SAME fail-safe list_all() itself already applies to a corrupt
+    item file, not a new risk this introduces."""
+    if not _index_built_marker().exists():
+        return None
     runnable_dir = STATE_INDEX_DIR / WorkState.RUNNABLE
     blocked_ext_dir = STATE_INDEX_DIR / WorkState.BLOCKED_EXTERNAL_SESSION
-    if not runnable_dir.exists() or not blocked_ext_dir.exists():
-        return None
     candidate_ids: set[str] = set()
     for d in (runnable_dir, blocked_ext_dir):
+        if not d.exists():
+            continue  # trustworthy: sentinel present means this genuinely means zero, not unindexed
         try:
             candidate_ids.update(p.name for p in d.iterdir())
         except OSError:

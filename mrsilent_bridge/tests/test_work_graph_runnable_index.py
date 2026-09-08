@@ -171,3 +171,41 @@ def test_recreating_an_existing_completed_work_id_never_leaves_stale_index_marke
     # the stale 'completed' marker must be gone, not just superseded
     completed_dir = tmp_path / "state_index" / wg.WorkState.COMPLETED
     assert not (completed_dir / "w1").exists()
+
+
+def test_fast_path_engages_even_when_blocked_external_session_never_used(monkeypatch, tmp_path):
+    """The exact real bug found and fixed 2026-09-08: requiring the
+    blocked_external_session index subdirectory to exist before trusting
+    the index meant a system where NOTHING has ever been externally
+    blocked (the common case — this is a rare state) permanently fell
+    back to the full scan, silently defeating the entire optimization. A
+    live measurement against this exact scenario originally showed a
+    speedup of only 1.0x — this test locks in the fix."""
+    _fresh(monkeypatch, tmp_path)
+    wg.create("w1", kind="task", description="d1")
+    wg.create("w2", kind="task", description="d2")
+    wg.mark_completed("w2", result={"ok": True})
+    wg.rebuild_state_index()
+
+    # blocked_external_session was NEVER used -- its directory must not exist
+    assert not (tmp_path / "state_index" / wg.WorkState.BLOCKED_EXTERNAL_SESSION).exists()
+    # yet the fast path must still engage (not silently return None)
+    candidates = wg._indexed_runnable_candidates()
+    assert candidates is not None
+    assert {c.work_id for c in candidates} == {"w1"}
+    assert _same(wg.runnable_items(), _oracle())
+
+
+def test_index_untrusted_before_first_rebuild_even_with_only_runnable_items(monkeypatch, tmp_path):
+    """Before rebuild_state_index() ever runs (fresh deployment, or an
+    existing population predating this feature), the index must NOT be
+    trusted yet, even though create()'s own hook already populated a
+    runnable/ directory — because pre-existing items created before the
+    hook existed would be invisible otherwise. The sentinel is what makes
+    this distinction correctly, not directory presence alone."""
+    _fresh(monkeypatch, tmp_path)
+    wg.create("w1", kind="task", description="d1")
+    assert (tmp_path / "state_index" / wg.WorkState.RUNNABLE).exists()
+    assert not (tmp_path / "state_index" / ".built").exists()
+    assert wg._indexed_runnable_candidates() is None  # correctly untrusted pre-rebuild
+    assert _same(wg.runnable_items(), _oracle())  # falls back correctly, still right answer
