@@ -380,7 +380,35 @@ def test_case_D_elevated_psi_blocks_the_cold_swap_override():
     allowed, reason = da.admission_decision(v)
     assert allowed is False
     assert da.dynamic_safe_concurrency(v) == 0
-    assert "not healthy enough" in reason  # falls through to the same conservative refusal path
+    # DIRECT_PSI_OOM_GATE (2026-09-08): admission_decision() now checks PSI
+    # directly, upfront, before ever reaching the swap-triggered override
+    # branch this test originally exercised — same real signal, a more
+    # precise refusal reason, still refused.
+    assert "memory pressure (PSI" in reason
+    assert "25.0%" in reason
+
+
+def test_direct_psi_gate_refuses_admission_even_with_no_swap_configured(monkeypatch):
+    """DIRECT_PSI_OOM_GATE (2026-09-08): real, live incident this closes —
+    node_capability_registry_state's real render-forge-01 record has
+    swap_total_mb==0.0 (no swap configured at all), so it could never reach
+    _cold_swap_override_eligible()'s own PSI/OOM check. Despite reporting
+    20GB 'available' memory, its real psi_memory_avg10 was 100.0 and
+    oom_kill_recent was True — admission_decision() admitted it anyway
+    before this fix. This is the regression guard, using that exact real
+    shape (swapless host, huge nominal headroom, saturated PSI + real OOM)."""
+    v = _vector(swap_total_mb=0.0, swap_used_mb=0.0, mem_available_mb=20363.0,
+                psi_memory_avg10=100.0, oom_kill_recent=True)
+    allowed, reason = da.admission_decision(v)
+    assert allowed is False
+    assert "OOM-kill" in reason
+
+
+def test_direct_psi_gate_healthy_swapless_host_still_admitted():
+    v = _vector(swap_total_mb=0.0, swap_used_mb=0.0, mem_available_mb=20363.0,
+                psi_memory_avg10=0.0, oom_kill_recent=False)
+    allowed, reason = da.admission_decision(v)
+    assert allowed is True, reason
 
 
 def test_case_E_recent_oom_kill_blocks_even_with_everything_else_healthy():

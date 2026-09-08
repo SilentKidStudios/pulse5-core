@@ -349,7 +349,31 @@ def admission_decision(
     allowed (dynamic_safe_concurrency() separately caps how many can run
     concurrently under this override — see COLD_SWAP_BOUNDED_CONCURRENCY_
     CAP). Actively thrashing swap, or cold swap without healthy available
-    memory, still refuses exactly as before."""
+    memory, still refuses exactly as before.
+
+    DIRECT_PSI_OOM_GATE (2026-09-08): psi_memory_avg10/oom_kill_recent were
+    collected on every ResourceVector but, before this fix, only ever
+    consulted inside _cold_swap_override_eligible() — a branch this
+    function only even reaches when vector.swap_total_mb > 0 AND swap is
+    already over MAX_SWAP_USED_PCT. A swapless host (real example: the
+    live node_capability_registry_state record for render-forge-01,
+    swap_total_mb==0.0) can never enter that branch at all, so a real,
+    kernel-measured distress signal — psi_memory_avg10==100.0 (maximally
+    stalled) and oom_kill_recent==True (an actual OOM kill already
+    happened) — was silently invisible to admission_decision(): mem_
+    available_mb alone (20GB, nominally healthy) was enough to admit.
+    "Available RAM" not proving genuine headroom is exactly the gap
+    _cold_swap_override_eligible()'s own docstring already names for the
+    swap-triggered path; this closes the identical gap for the swapless
+    path, using the SAME two real signals, never a new inferred one."""
+    if vector.oom_kill_recent:
+        return False, "a real OOM-kill event occurred recently on this host — refusing admission regardless of reported available memory"
+    if vector.psi_memory_avg10 > MAX_PSI_MEMORY_AVG10_FOR_COLD_SWAP_PCT:
+        return False, (
+            f"memory pressure (PSI some avg10): {vector.psi_memory_avg10:.1f}% "
+            f"(limit {MAX_PSI_MEMORY_AVG10_FOR_COLD_SWAP_PCT:.1f}%) — genuine kernel-measured "
+            "stalling, independent of nominally 'available' memory"
+        )
     if vector.mem_available_mb - required_mem_mb < MIN_FREE_MEM_MB:
         return False, (
             f"insufficient free memory: {vector.mem_available_mb:.0f}MB available, "

@@ -74,6 +74,7 @@ def _healthy_vector() -> da.ResourceVector:
         mem_total_mb=16000, mem_available_mb=8000,
         swap_total_mb=2000, swap_used_mb=0,
         disk_total_gb=300, disk_free_gb=150, disk_used_pct=50.0,
+        psi_memory_avg10=0.0, oom_kill_recent=False,  # DIRECT_PSI_OOM_GATE (2026-09-08): healthy baseline
     )
 
 

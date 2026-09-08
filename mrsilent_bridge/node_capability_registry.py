@@ -14,15 +14,22 @@ deliberately kept separate from that untracked/uncertain-ownership area.
 
 Scope, deliberately bounded: this module answers "which registered node
 SHOULD this work item run on" (PLACEMENT_DECISION) and tracks node
-health/capability metadata (NODE_CAPABILITY_REGISTRY, NODE_HEALTH). It does
-NOT implement real remote task submission/execution against any external
-host (e.g. render-forge-01, a separate, shared piece of infrastructure this
-campaign does not have clear standing to issue real remote jobs against
-without separate explicit authorization — see FAIL_CLOSED_IF_NODE_
-UNAVAILABLE below, which is exactly the safety property that matters when
-no such execution path exists yet). A future slice can wire an actual
-REMOTE_EXECUTION_PROVENANCE/RESULT_RETURN transport behind
-placement_decision()'s result without changing this module's contract.
+health/capability metadata (NODE_CAPABILITY_REGISTRY, NODE_HEALTH).
+
+2026-09-07 Founder authorization (narrow, explicit): probe_ssh_node_
+health() may connect to a remote node (e.g. render-forge-01) over SSH and
+run READ-ONLY hostname/CPU/RAM/GPU/VRAM/disk commands for capability
+observation only. That authorization explicitly does NOT cover task
+dispatch, remote writes, service restarts, package/model changes, or
+credential changes — see probe_ssh_node_health()'s own docstring. This
+module still does NOT implement real remote task submission/execution
+against any external host; render-forge-01 remains a separate, shared
+piece of production infrastructure (it runs Scorpio's Corner, which is
+protected and untouched by anything here) this campaign does not have
+standing to issue real remote jobs against without further separate
+authorization. A future slice can wire an actual REMOTE_EXECUTION_
+PROVENANCE/RESULT_RETURN transport behind placement_decision()'s result
+without changing this module's contract.
 
 FAIL_CLOSED_IF_NODE_UNAVAILABLE: a node with no health record, a stale
 health record, or an explicit "unreachable"/"degraded" status is NEVER
@@ -35,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,6 +81,10 @@ class NodeRecord:
     endpoint: str | None = None       # informational only — no code here calls it
     health_status: str = UNKNOWN
     resource_vector: dict[str, Any] | None = None
+    # Non-CPU/mem/disk observation data (e.g. remote hostname, GPU/VRAM) that
+    # doesn't fit da.ResourceVector's admission-decision contract. Additive
+    # and optional so existing serialized records/tests are unaffected.
+    extra: dict[str, Any] | None = None
     registered_at: str = ""
     updated_at: str = ""
     last_health_check_at: str = ""
@@ -123,17 +135,21 @@ def register_node(node_id: str, *, capabilities: list[str], endpoint: str | None
     return record
 
 
-def record_health(node_id: str, status: str, *, resource_vector: dict[str, Any] | None = None) -> NodeRecord:
+def record_health(
+    node_id: str, status: str, *,
+    resource_vector: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> NodeRecord:
     """NODE_HEALTH: the ONLY way a node's health_status changes — never
-    inferred, never assumed. A caller with a real remote probe (future
-    slice) calls this after that probe; nothing in this module invents a
-    probe result."""
+    inferred, never assumed. A caller with a real remote probe calls this
+    after that probe; nothing in this module invents a probe result."""
     record = load(node_id)
     if record is None:
         raise ValueError(f"no registered node {node_id!r} — call register_node() first")
     now = _now()
     record.health_status = status
     record.resource_vector = resource_vector
+    record.extra = extra
     record.last_health_check_at = now
     record.updated_at = now
     _atomic_write_json(_path(node_id), asdict(record))
@@ -171,6 +187,115 @@ def ensure_local_node_registered() -> NodeRecord:
         resource_vector=asdict(vector),
     )
     return load(LOCAL_NODE_ID)
+
+
+SSH_PROBE_TIMEOUT_S = 10
+
+# Founder-authorized (2026-09-07), READ-ONLY CAPABILITY OBSERVATION ONLY:
+# hostname/CPU/RAM/GPU/VRAM/disk visibility for placement scoring. This
+# authorization explicitly does NOT extend to task dispatch, remote writes,
+# service control, model/package changes, or credential changes — see
+# probe_ssh_node_health()'s docstring. Nothing below issues a mutating
+# remote command.
+_REMOTE_READ_ONLY_PROBE_SCRIPT = (
+    "hostname; "
+    "nproc; "
+    "cat /proc/loadavg; "
+    "free -m | awk '/^Mem:/{print $2, $7}'; "
+    "free -m | awk '/^Swap:/{print $2, $3}'; "
+    "df -BG / | awk 'NR==2{gsub(\"G\",\"\",$2); gsub(\"G\",\"\",$4); print $2, $4}'; "
+    "nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu "
+    "--format=csv,noheader,nounits 2>/dev/null || echo NO_GPU"
+)
+
+
+def probe_ssh_node_health(
+    node_id: str,
+    *,
+    ssh_target: str,
+    ssh_key: str | None = None,
+    capabilities: list[str] | None = None,
+    timeout_s: int = SSH_PROBE_TIMEOUT_S,
+) -> NodeRecord:
+    """Real, READ-ONLY remote health probe over SSH — capability
+    observation only. Founder authorization for this function covers
+    exactly: connecting via existing SSH credentials, running read-only
+    hostname/CPU/RAM/GPU/VRAM/disk commands, and recording the result.
+    It never dispatches work, never writes to the remote host, never
+    restarts anything, and never touches credentials. A future slice
+    would need separate authorization to add any of that.
+
+    FAIL_CLOSED_IF_NODE_UNAVAILABLE applies identically to remote nodes:
+    any failure (unreachable host, auth failure, timeout, unparseable
+    output) marks the node UNREACHABLE rather than guessing, and a
+    strict subprocess timeout ensures an unreachable/slow remote host
+    cannot stall the caller.
+
+    Never logs ssh_key or command output — only the parsed, structured
+    result is returned/persisted.
+    """
+    if capabilities is not None:
+        register_node(node_id, capabilities=capabilities, endpoint=ssh_target)
+    elif load(node_id) is None:
+        register_node(node_id, capabilities=[], endpoint=ssh_target)
+
+    ssh_cmd = [
+        "ssh", "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout={timeout_s}",
+        "-o", "StrictHostKeyChecking=accept-new",
+    ]
+    if ssh_key:
+        ssh_cmd += ["-i", ssh_key]
+    ssh_cmd += [ssh_target, _REMOTE_READ_ONLY_PROBE_SCRIPT]
+
+    try:
+        result = subprocess.run(
+            ssh_cmd, capture_output=True, text=True, timeout=timeout_s + 5,
+        )
+        if result.returncode != 0:
+            return record_health(node_id, UNREACHABLE)
+        lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
+        if len(lines) < 6:
+            return record_health(node_id, UNREACHABLE)
+
+        remote_hostname = lines[0]
+        cpu_count = int(lines[1])
+        load_avg_1m = float(lines[2].split()[0])
+        mem_total_mb, mem_available_mb = (float(x) for x in lines[3].split())
+        swap_total_mb, swap_used_mb = (float(x) for x in lines[4].split())
+        disk_total_gb, disk_free_gb = (float(x) for x in lines[5].split())
+        disk_used_pct = (
+            (disk_total_gb - disk_free_gb) / disk_total_gb * 100.0 if disk_total_gb else 0.0
+        )
+
+        gpu_info: dict[str, Any] = {"present": False}
+        if len(lines) >= 7 and lines[6] != "NO_GPU":
+            parts = [p.strip() for p in lines[6].split(",")]
+            if len(parts) == 4:
+                gpu_info = {
+                    "present": True,
+                    "name": parts[0],
+                    "vram_total_mb": float(parts[1]),
+                    "vram_used_mb": float(parts[2]),
+                    "utilization_pct": float(parts[3]),
+                }
+
+        vector = da.ResourceVector(
+            cpu_count=cpu_count, load_avg_1m=load_avg_1m,
+            mem_total_mb=mem_total_mb, mem_available_mb=mem_available_mb,
+            swap_total_mb=swap_total_mb, swap_used_mb=swap_used_mb,
+            disk_total_gb=disk_total_gb, disk_free_gb=disk_free_gb,
+            disk_used_pct=disk_used_pct,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
+        return record_health(node_id, UNREACHABLE)
+
+    allowed, _reason = da.admission_decision(vector)
+    return record_health(
+        node_id, HEALTHY if allowed else DEGRADED,
+        resource_vector=asdict(vector),
+        extra={"hostname": remote_hostname, "gpu": gpu_info},
+    )
 
 
 @dataclass
