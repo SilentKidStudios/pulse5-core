@@ -44,6 +44,10 @@ BRIDGE_ROOT = Path(__file__).resolve().parent
 WORK_GRAPH_ROOT = BRIDGE_ROOT / "work_graph_state"
 ITEMS_DIR = WORK_GRAPH_ROOT / "items"
 LOCKS_DIR = WORK_GRAPH_ROOT / "locks"
+STATE_INDEX_DIR = WORK_GRAPH_ROOT / "state_index"  # see runnable_items()'s own docstring
+# (2026-09-08 scale fix) — one subdirectory per WorkState value, each containing zero-byte marker
+# files named by work_id. A directory listing (os.listdir/scandir) is O(items in that state), not
+# O(total population) — this is what lets runnable_items() avoid a full list_all() scan at scale.
 
 # A RUNNING item whose heartbeat is older than this is presumed to have lost
 # its owner (crashed process, killed worker) — see is_stale()/reclaim_stale().
@@ -63,6 +67,20 @@ class WorkState:
     BLOCKED_DEPENDENCY = "blocked_dependency"
     BLOCKED_FOUNDER = "blocked_founder"
     BLOCKED_EXTERNAL_SESSION = "blocked_external_session"
+    BLOCKED_DEFERRED = "blocked_deferred"  # DEFERRED-CHURN gap-closure (2026-09-06): parks a WorkItem
+    # backing a proposal whose canonical status is DEFERRED — advance_one() never accepts DEFERRED
+    # as an eligible starting status (only OBSERVED/PROPOSED), so leaving such an item RUNNABLE
+    # produced permanent REPAIRABLE_FAILED/retry churn for work that can never actually advance.
+    # Distinct from BLOCKED_FOUNDER (a different, risk-classification axis) so status snapshots
+    # stay truthful about WHY an item isn't running. See proposal_work_bridge.py's population logic.
+    BLOCKED_REFINEMENT = "blocked_refinement"  # PROPOSAL COMPLETENESS GATE (2026-09-07): parks a WorkItem
+    # backing a proposal that is risk_score=='founder_gated' but not yet decision-ready (see
+    # evolution/proposal.py::proposal_completeness()) — i.e. it has NOT yet been surfaced to the
+    # Founder at all. Distinct from BLOCKED_FOUNDER, which means "a complete, decision-ready
+    # proposal is genuinely awaiting an explicit Founder decision" — conflating the two would mean
+    # an incomplete, un-scoped proposal (like a bare "this priority needs scoping" placeholder)
+    # shows up in the same Founder-visible queue as a real, reviewable decision, exactly the
+    # babysitting-load problem this gate exists to remove. See proposal_work_bridge.py.
     RUNNING = "running"
     VALIDATING = "validating"
     REPAIRABLE_FAILED = "repairable_failed"
@@ -73,6 +91,7 @@ class WorkState:
 TERMINAL_STATES = frozenset({WorkState.COMPLETED, WorkState.TERMINAL_FAILED})
 BLOCKED_STATES = frozenset({
     WorkState.BLOCKED_DEPENDENCY, WorkState.BLOCKED_FOUNDER, WorkState.BLOCKED_EXTERNAL_SESSION,
+    WorkState.BLOCKED_DEFERRED, WorkState.BLOCKED_REFINEMENT,
 })
 
 
@@ -102,6 +121,69 @@ def objective_fingerprint(text: str) -> str:
     represented', independent of who asked — mirrors job_ledger.task_
     fingerprint()'s exact reasoning, applied at the work-graph layer."""
     return hashlib.sha256(text.strip().encode()).hexdigest()[:16]
+
+
+def _all_known_states() -> tuple[str, ...]:
+    """Introspects WorkState's own string attributes rather than a
+    hand-maintained list — so a future new state (like BLOCKED_REFINEMENT,
+    added 2026-09-07) is automatically covered by index cleanup without a
+    second place needing to be remembered and updated."""
+    return tuple(v for k, v in vars(WorkState).items() if not k.startswith("_") and isinstance(v, str))
+
+
+def _index_mark_state(work_id: str, state: str, *, clear_others: bool = True) -> None:
+    """Records work_id as CURRENTLY in `state` for the fast runnable-lookup
+    index (see STATE_INDEX_DIR). By default removes any marker from every
+    OTHER known state's directory first — unconditionally, correct
+    regardless of what the item's previous state actually was, so this
+    never depends on tracking a 'previous state' anywhere.
+
+    `clear_others=False` (2026-09-08, write-overhead fix): a real,
+    measured cost — ~10 unlink(missing_ok=True) syscalls per save, which
+    is operationally negligible at real natural-cycle write volumes (a
+    handful of state changes per cycle) but became the dominant cost in a
+    synthetic bulk-creation benchmark (10K+ sequential creates). The two
+    callers that can PROVE no stale marker could possibly exist —
+    create() (a brand-new work_id has never been indexed before) and
+    rebuild_state_index() (the whole index directory was just wiped) —
+    pass this to skip the unconditionally-safe-but-wasteful cleanup loop.
+    _save() (the only path where an item's PREVIOUS indexed state is
+    genuinely unknown here) always uses the default True.
+
+    Best-effort throughout: an index write failure is swallowed — the
+    authoritative WorkItem file (already written by the caller before
+    this runs) remains correct either way; runnable_items() falls back to
+    a full scan whenever the index can't be trusted (see its own
+    docstring), so a missed/corrupt marker degrades to the pre-existing
+    O(n) behavior, never to a wrong answer."""
+    try:
+        if clear_others:
+            for s in _all_known_states():
+                if s != state:
+                    (STATE_INDEX_DIR / s / work_id).unlink(missing_ok=True)
+        target_dir = STATE_INDEX_DIR / state
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / work_id).touch()
+    except OSError:
+        pass
+
+
+def rebuild_state_index() -> dict[str, int]:
+    """One-time (or ad-hoc repair) full rebuild of STATE_INDEX_DIR from the
+    real, authoritative ITEMS_DIR — the only place this module ever does a
+    full list_all() scan for index purposes, deliberately: this is how a
+    population that existed before this index existed (or an index that
+    somehow drifted) gets a trustworthy index without ever guessing.
+    Idempotent and safe to run any time; wipes and rewrites the whole
+    index directory from ground truth. Returns {state: count}."""
+    import shutil
+    if STATE_INDEX_DIR.exists():
+        shutil.rmtree(STATE_INDEX_DIR)
+    counts: dict[str, int] = {}
+    for record in list_all():
+        _index_mark_state(record.work_id, record.state, clear_others=False)  # directory just wiped above
+        counts[record.state] = counts.get(record.state, 0) + 1
+    return counts
 
 
 @dataclass
@@ -151,6 +233,14 @@ def create(
     provenance: dict[str, Any] | None = None,
 ) -> WorkItem:
     now = _now()
+    # every real caller (mission.py, proposal_work_bridge.py) already
+    # guards with load(work_id) is None before calling create() — this is
+    # what makes clear_others=False below provably safe in the common
+    # case. Checked here too, defensively: a future caller that violates
+    # that convention and re-creates an existing work_id still gets the
+    # safe (if slower) clear_others=True path, never a silently-stale
+    # marker left behind in the item's PRIOR state's index directory.
+    pre_existing = _path(work_id).exists()
     fp = objective_fingerprint(f"{kind}:{description}")
     depends_on = list(depends_on or [])
     for dep_id in depends_on:
@@ -167,6 +257,7 @@ def create(
         history=[{"at": now, "state": WorkState.RUNNABLE, "note": "created"}],
     )
     _atomic_write_json(_path(work_id), asdict(record))
+    _index_mark_state(work_id, record.state, clear_others=pre_existing)
     return record
 
 
@@ -199,6 +290,7 @@ def _save(record: WorkItem, *, note: str = "") -> WorkItem:
     if note:
         record.history.append({"at": now, "state": record.state, "note": note})
     _atomic_write_json(_path(record.work_id), asdict(record))
+    _index_mark_state(record.work_id, record.state)
     return record
 
 
@@ -330,6 +422,34 @@ def mark_blocked_founder(work_id: str, *, note: str = "") -> WorkItem:
     return _save(record, note=note or "blocked on Founder gate")
 
 
+def mark_blocked_deferred(work_id: str, *, note: str = "") -> WorkItem:
+    """Parks a WorkItem whose backing proposal is currently DEFERRED —
+    see WorkState.BLOCKED_DEFERRED's docstring. Never removes the item or
+    its provenance; the very next population pass that finds the proposal's
+    status has changed away from DEFERRED will release it exactly like
+    mark_blocked_founder()'s Founder-decision-resolved release does."""
+    record = load(work_id)
+    if record is None:
+        raise ValueError(f"no work item {work_id!r}")
+    record.state = WorkState.BLOCKED_DEFERRED
+    return _save(record, note=note or "blocked: backing proposal is deferred")
+
+
+def mark_blocked_refinement(work_id: str, *, note: str = "") -> WorkItem:
+    """Parks a WorkItem backing a founder_gated proposal that is not yet
+    decision-ready (see evolution/proposal.py::proposal_completeness()) —
+    deliberately NEVER routes through BLOCKED_FOUNDER, so it never appears
+    in the Founder-visible blocked_founder rollup. The very next population
+    pass that finds the proposal has become decision-ready releases it to
+    BLOCKED_FOUNDER (if still genuinely founder_gated) exactly like
+    mark_blocked_deferred()'s release does — see proposal_work_bridge.py."""
+    record = load(work_id)
+    if record is None:
+        raise ValueError(f"no work item {work_id!r}")
+    record.state = WorkState.BLOCKED_REFINEMENT
+    return _save(record, note=note or "blocked: backing proposal is not yet decision-ready")
+
+
 def mark_completed(work_id: str, *, result: dict[str, Any] | None = None) -> WorkItem:
     record = load(work_id)
     if record is None:
@@ -454,27 +574,134 @@ def effective_priority(record: WorkItem, *, now: datetime | None = None, aging_r
     return record.priority + aging_rate * age_minutes
 
 
-def runnable_items(*, self_session_id: str | None = None) -> list[WorkItem]:
-    """Every item currently eligible to run: state==RUNNABLE, all
-    dependencies satisfied (should already be true given resume_eligible_
-    parents(), re-checked defensively), and — if session_ownership is
-    importable and the item declares an owner_path — not
-    BLOCKED_EXTERNAL_ACTIVE_SESSION. Ordered by effective_priority()
-    descending so aging/fairness is applied consistently at the one place
-    a scheduler asks "what can I run next". A path blocked by another
-    session is transitioned to BLOCKED_EXTERNAL_SESSION as a side effect (so
-    it's visible in scale/status snapshots) but never removed from the graph
-    — it resumes automatically the moment classify_path_ownership() clears
-    (UNRELATED_WORK_CONTINUES_WHILE_EXTERNAL_BLOCK_EXISTS: this function
-    simply excludes it from the returned list; every other eligible item is
-    still returned)."""
+FRESH_WORK_MIN_AGE_GAP_MINUTES = 5.0
+# The minimum real age gap (in minutes) between a candidate and the item it
+# would displace before scheduler.py's fresh-work reservation (see
+# freshest_eligible()) actually applies. Without this, "pick whichever
+# eligible item is nominally most recently created" fires on pure
+# microsecond-scale creation-order noise between items created in the same
+# instant (proven by this session's own test regression: a synthetic 3-item
+# batch created back-to-back in one test run, where "freshest" was
+# meaningless and displaced a deliberately-different test item that should
+# have been dispatched). 5 minutes is comfortably smaller than the real
+# gap this fix targets (real backlog items are days-to-weeks old vs.
+# genuinely new arrivals) while comfortably larger than any burst of
+# items created together in the same pass/test.
+
+
+def is_meaningfully_fresher(candidate: WorkItem, displaced: WorkItem, *, now: datetime | None = None) -> bool:
+    """True iff `candidate` was created at least FRESH_WORK_MIN_AGE_GAP_
+    MINUTES more recently than `displaced` — i.e. there is a real,
+    meaningful "old backlog vs. new arrival" story to protect, not just
+    creation-order noise between near-simultaneous items. Fails closed to
+    False or either created_at is unparseable — an ambiguous comparison
+    never triggers the reservation."""
+    try:
+        c = datetime.fromisoformat(candidate.created_at)
+        d = datetime.fromisoformat(displaced.created_at)
+    except (ValueError, TypeError):
+        return False
+    if c.tzinfo is None:
+        c = c.replace(tzinfo=timezone.utc)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    gap_minutes = (c - d).total_seconds() / 60.0  # positive iff candidate is newer (more recent) than displaced
+    return gap_minutes >= FRESH_WORK_MIN_AGE_GAP_MINUTES
+
+
+def freshest_eligible(items: list[WorkItem]) -> WorkItem | None:
+    """The single most-recently-created item among `items` (by real
+    created_at, not effective_priority) — or None for an empty list.
+
+    FRESH_WORK_LIVENESS (2026-09-06): effective_priority()'s aging bonus
+    only protects OLD work from being starved by a continuous stream of
+    NEW high-priority arrivals (campaign section 10) — it provides no
+    symmetric guarantee in the other direction. A long-lived, continuously
+    replenished backlog (this Studio's ordinary proposal queue — real
+    natural evidence this campaign gathered showed 85-120+ items RUNNABLE
+    essentially every cycle, most weeks old) can keep every genuinely
+    fresh item permanently behind it: a brand-new item starts its own age
+    bonus from zero and can never catch up to items that have already
+    been aging for weeks, at 0.01 priority-equivalent per minute of age.
+    Used by scheduler.py to reserve exactly one bounded dispatch slot per
+    pass for the freshest eligible item, without touching effective_
+    priority()'s own ordering or the "aging eventually outranks fresh
+    high-priority work" guarantee for old low-priority items (see
+    test_anti_starvation_aging_eventually_outranks_higher_priority) — this
+    is a SEPARATE, narrow, symmetric guarantee for the opposite failure
+    direction, not a replacement for the existing mechanism.
+
+    An item with unparseable created_at is never treated as "freshest" —
+    fails closed to being ignored by this specific selection, exactly
+    like effective_priority()'s own fallback for the same case."""
+    best: WorkItem | None = None
+    best_epoch = float("-inf")
+    for item in items:
+        try:
+            created = datetime.fromisoformat(item.created_at)
+        except (ValueError, TypeError):
+            continue
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        epoch = created.timestamp()
+        if epoch > best_epoch:
+            best_epoch = epoch
+            best = item
+    return best
+
+
+def _indexed_runnable_candidates() -> list[WorkItem] | None:
+    """Fast candidate source for runnable_items() (2026-09-08 scale fix):
+    reads STATE_INDEX_DIR/runnable/ and STATE_INDEX_DIR/blocked_external_
+    session/ (the only two states runnable_items() itself ever cares
+    about) via a plain directory listing — O(items in those two states),
+    never O(total population) — then load()s just those specific items.
+
+    Returns None (never a guess) whenever the index cannot be trusted,
+    so the caller falls back to the original full list_all() scan:
+      - the index directory doesn't exist yet (pre-index population, or
+        rebuild_state_index() never run) — a fresh deployment must not
+        silently believe 'nothing is runnable' just because no marker
+        files exist yet.
+      - EITHER relevant state subdirectory is itself missing — same
+        reasoning: absence of the directory means 'never indexed', not
+        'genuinely zero items', and those are different facts this
+        function must never conflate.
+    A marker whose underlying item no longer loads (deleted/corrupt) is
+    silently skipped — the SAME fail-safe list_all() itself already
+    applies to a corrupt item file, not a new risk this introduces."""
+    runnable_dir = STATE_INDEX_DIR / WorkState.RUNNABLE
+    blocked_ext_dir = STATE_INDEX_DIR / WorkState.BLOCKED_EXTERNAL_SESSION
+    if not runnable_dir.exists() or not blocked_ext_dir.exists():
+        return None
+    candidate_ids: set[str] = set()
+    for d in (runnable_dir, blocked_ext_dir):
+        try:
+            candidate_ids.update(p.name for p in d.iterdir())
+        except OSError:
+            return None
+    candidates = []
+    for work_id in candidate_ids:
+        record = load(work_id)
+        if record is not None:
+            candidates.append(record)
+    return candidates
+
+
+def _filter_runnable(candidates: list[WorkItem], *, self_session_id: str | None = None) -> list[WorkItem]:
+    """The actual eligibility filter — state==RUNNABLE, dependencies met,
+    not externally blocked — shared verbatim by BOTH the indexed fast path
+    and the full-scan fallback in runnable_items(), so the two candidate
+    SOURCES can never silently diverge in FILTERING semantics; only one
+    filtering implementation exists. See runnable_items()'s own docstring
+    for the full behavioral contract this implements."""
     try:
         import session_ownership
     except ImportError:
         session_ownership = None  # soft dependency — degrade to "always available"
 
     out = []
-    for record in list_all():
+    for record in candidates:
         if record.state == WorkState.BLOCKED_EXTERNAL_SESSION:
             # re-check: has the external lease cleared since we last looked?
             if record.owner_path and session_ownership is not None:
@@ -501,6 +728,35 @@ def runnable_items(*, self_session_id: str | None = None) -> list[WorkItem]:
         out.append(record)
     out.sort(key=lambda r: effective_priority(r), reverse=True)
     return out
+
+
+def runnable_items(*, self_session_id: str | None = None) -> list[WorkItem]:
+    """Every item currently eligible to run: state==RUNNABLE, all
+    dependencies satisfied (should already be true given resume_eligible_
+    parents(), re-checked defensively), and — if session_ownership is
+    importable and the item declares an owner_path — not
+    BLOCKED_EXTERNAL_ACTIVE_SESSION. Ordered by effective_priority()
+    descending so aging/fairness is applied consistently at the one place
+    a scheduler asks "what can I run next". A path blocked by another
+    session is transitioned to BLOCKED_EXTERNAL_SESSION as a side effect (so
+    it's visible in scale/status snapshots) but never removed from the graph
+    — it resumes automatically the moment classify_path_ownership() clears
+    (UNRELATED_WORK_CONTINUES_WHILE_EXTERNAL_BLOCK_EXISTS: this function
+    simply excludes it from the returned list; every other eligible item is
+    still returned).
+
+    SCALE FIX (2026-09-08): sources its candidate set from STATE_INDEX_DIR
+    (see _indexed_runnable_candidates()) instead of a full list_all() scan
+    whenever the index can be trusted — proven, via a real A/B oracle
+    against the exact previous full-scan implementation, to return
+    identical results (see tests/test_work_graph_runnable_index.py). Falls
+    back to the original full-scan behavior, unchanged, whenever the index
+    is missing/unbuilt — never a behavior change, only a faster source for
+    the SAME filter (_filter_runnable(), shared by both paths)."""
+    candidates = _indexed_runnable_candidates()
+    if candidates is None:
+        candidates = list_all()
+    return _filter_runnable(candidates, self_session_id=self_session_id)
 
 
 # ---- lease/heartbeat crash recovery (mirrors job_ledger.py exactly) --------
@@ -624,7 +880,8 @@ def touch_heartbeat(work_id: str) -> None:
 def status_counts() -> dict[str, int]:
     counts: dict[str, int] = {
         "TASK_COUNT": 0, "RUNNABLE": 0, "RUNNING": 0, "BLOCKED_DEPENDENCY": 0,
-        "BLOCKED_FOUNDER": 0, "BLOCKED_EXTERNAL_SESSION": 0, "VALIDATING": 0,
+        "BLOCKED_FOUNDER": 0, "BLOCKED_EXTERNAL_SESSION": 0, "BLOCKED_DEFERRED": 0,
+        "BLOCKED_REFINEMENT": 0, "VALIDATING": 0,
         "REPAIRABLE_FAILED": 0, "COMPLETED": 0, "TERMINAL": 0,
     }
     for r in list_all():
@@ -639,6 +896,10 @@ def status_counts() -> dict[str, int]:
             counts["BLOCKED_FOUNDER"] += 1
         elif r.state == WorkState.BLOCKED_EXTERNAL_SESSION:
             counts["BLOCKED_EXTERNAL_SESSION"] += 1
+        elif r.state == WorkState.BLOCKED_DEFERRED:
+            counts["BLOCKED_DEFERRED"] += 1
+        elif r.state == WorkState.BLOCKED_REFINEMENT:
+            counts["BLOCKED_REFINEMENT"] += 1
         elif r.state == WorkState.VALIDATING:
             counts["VALIDATING"] += 1
         elif r.state == WorkState.REPAIRABLE_FAILED:
