@@ -123,6 +123,97 @@ def resolve_founder_decision(escalation_id: str, decision: str, *, note: str = "
     return record
 
 
+# --- DELEGATED BACKLOG-HYGIENE RETIREMENT (Founder-authorized 2026-09-08) --
+#
+# NOT a third Founder-decision value. resolve_founder_decision() above is
+# completely untouched -- 'approved'/'denied' remain the ONLY two ways a
+# record can carry an actual Founder decision, and this function can never
+# produce either of those values (see the hard-coded category allowlist
+# below, and the guard that refuses to touch an already-'approved'/'denied'
+# record). This is a SEPARATE status namespace for a SEPARATE, narrower
+# authority: retiring a pending record whose own durable evidence proves it
+# is no longer real Founder-facing work at all (test/synthetic noise, or a
+# job that already reached a terminal state on its own) -- never a stand-in
+# for a real yes/no on genuine Founder-gated work, which stays pending
+# exactly as before.
+HYGIENE_RETIRED_STALE = "HYGIENE_RETIRED_STALE"
+HYGIENE_RETIRED_DUPLICATE = "HYGIENE_RETIRED_DUPLICATE"
+HYGIENE_RETIRED_SUPERSEDED = "HYGIENE_RETIRED_SUPERSEDED"
+HYGIENE_RETIRED_INVALID = "HYGIENE_RETIRED_INVALID"
+HYGIENE_RETIRED_ALREADY_TERMINAL = "HYGIENE_RETIRED_ALREADY_TERMINAL"
+HYGIENE_RETIRED_ALREADY_SATISFIED = "HYGIENE_RETIRED_ALREADY_SATISFIED"
+HYGIENE_RETIRED_NONACTIONABLE = "HYGIENE_RETIRED_NONACTIONABLE"
+
+HYGIENE_RETIREMENT_CATEGORIES = frozenset({
+    HYGIENE_RETIRED_STALE, HYGIENE_RETIRED_DUPLICATE, HYGIENE_RETIRED_SUPERSEDED,
+    HYGIENE_RETIRED_INVALID, HYGIENE_RETIRED_ALREADY_TERMINAL,
+    HYGIENE_RETIRED_ALREADY_SATISFIED, HYGIENE_RETIRED_NONACTIONABLE,
+})
+
+HYGIENE_AUTHORITY = "delegated_founder_backlog_hygiene_authority_v1"  # never "self_approval"
+
+
+def retire_for_backlog_hygiene(
+    escalation_id: str, category: str, *, evidence: dict[str, Any], reason: str,
+    canonical_survivor_id: str | None = None, superseding_reference: str | None = None,
+    requested_by: str = "approval_backlog_hygiene",
+) -> dict[str, Any]:
+    """Retires ONE pending escalation as backlog hygiene -- never as a
+    Founder decision. Hard guards, every one of them a refusal (never a
+    silent no-op that could be mistaken for success):
+      - category must be one of HYGIENE_RETIREMENT_CATEGORIES exactly (no
+        caller can invent a new label, let alone 'approved'/'denied').
+      - the record must currently be status == 'pending_founder_review'.
+        A record already 'approved'/'denied' is refused outright -- real
+        Founder-decision history is NEVER rewritten by this function,
+        under any category, for any reason. An already-retired record is
+        also refused (not silently re-retired) so a caller always knows
+        whether THIS call actually changed anything -- idempotent retry at
+        the ORCHESTRATION layer (see approval_backlog_hygiene.py) is what
+        makes repeated hygiene passes safe, not silent tolerance here.
+      - `evidence` and `reason` are required (never optional/blank) -- a
+        retirement with no recorded justification is refused; this
+        function has no way to verify TRUTHFULNESS of the evidence a
+        caller passes, only that something concrete was actually supplied.
+    Preserves full lineage: the original payload/created_at/requested_by
+    are untouched; only status changes, plus an additive
+    `hygiene_retirement` record of exactly what happened and why."""
+    if category not in HYGIENE_RETIREMENT_CATEGORIES:
+        raise ValueError(f"category must be one of {sorted(HYGIENE_RETIREMENT_CATEGORIES)}, got {category!r}")
+    if not evidence:
+        raise ValueError("evidence is required for a backlog-hygiene retirement")
+    if not reason:
+        raise ValueError("reason is required for a backlog-hygiene retirement")
+    path = ESCALATIONS_DIR / f"{escalation_id}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"no escalation record {escalation_id}")
+    record = json.loads(path.read_text())
+    current_status = record.get("status")
+    if current_status in ("approved", "denied"):
+        raise ValueError(
+            f"escalation {escalation_id} already carries a real Founder decision ({current_status!r}) "
+            "-- backlog hygiene can never touch it"
+        )
+    if current_status != "pending_founder_review":
+        raise ValueError(
+            f"escalation {escalation_id} is not pending (status={current_status!r}) -- refusing to "
+            "re-retire or otherwise mutate a record hygiene retirement does not own"
+        )
+    record["status"] = category
+    record["hygiene_retirement"] = {
+        "authority": HYGIENE_AUTHORITY,
+        "category": category,
+        "reason": reason,
+        "evidence": evidence,
+        "canonical_survivor_id": canonical_survivor_id,
+        "superseding_reference": superseding_reference,
+        "retired_at": datetime.now(timezone.utc).isoformat(),
+        "requested_by": requested_by,
+    }
+    path.write_text(json.dumps(record, indent=2))
+    return record
+
+
 def exact_proposal_decision(proposal_id: str) -> str | None:
     """Returns the most recently RESOLVED canonical Founder decision
     ('approved' | 'denied') for this EXACT proposal_id, or None when no

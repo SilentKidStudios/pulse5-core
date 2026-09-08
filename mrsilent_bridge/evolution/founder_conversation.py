@@ -599,19 +599,48 @@ def _gather_studio_evidence() -> dict[str, Any]:
     """Real, bounded evidence snapshot for the natural-language fallback —
     reuses the EXACT same real data sources handle_intent()'s own
     deterministic branches already call (autonomous_cycle, evolution.
-    proposal lessons, evolution.founder_request, campaign, organ_discovery).
-    No new data source, no fabrication; this is the SAME evidence a
-    deterministic query would have returned, just gathered broadly enough
-    for a model to reason across several of them at once."""
+    proposal lessons, evolution.founder_request, campaign, organ_discovery),
+    PLUS (2026-09-08 Domain G connection) this campaign's own studio_
+    status.py aggregator and mission.py's Mission/WorkGraph state — real
+    sources that existed but were never wired into this conversational
+    layer. No new data source invented, no fabrication; this is the SAME
+    evidence a deterministic query would have returned, gathered broadly
+    enough for a model to reason across several of them at once.
+
+    Defect fixed here: pending_founder_requests previously came straight
+    from founder_request.list_pending_founder_requests() — the SAME raw,
+    unfiltered list whose Telegram-push equivalent leaked test/synthetic
+    campaigns into the real Founder channel (fixed separately, same
+    campaign). This function had the identical bug in the conversational
+    answer path: a Founder asking "what needs me?" could have been told
+    about test fixtures. Now sourced from approval_backlog_hygiene's real,
+    tested classification instead — the same fix, applied to the second
+    place it was needed.
+
+    WorkGraph state is summarized (counts by state), never dumped item-by-
+    item — studio_status.collect() already does this bounding; this
+    function does not re-derive or duplicate that logic."""
     import autonomous_cycle
     import campaign as campaign_mod
+    import mission
     import organ_discovery
-    from evolution import founder_request
+    import approval_backlog_hygiene
+    import studio_status as studio_status_mod
 
     history = autonomous_cycle.cycle_history_summary(limit=10)
     latest = autonomous_cycle.latest_cycle()
-    pending = founder_request.list_pending_founder_requests()
     active_missions = [c for c in campaign_mod.list_all() if c.status in (campaign_mod.STATUS_ACTIVE, campaign_mod.STATUS_PAUSED)]
+
+    # Real, filtered pending approvals (test/synthetic noise excluded) —
+    # see defect note above. capability_needed=="production_promotion" is
+    # always a genuine Founder gate; everything else real-and-pending
+    # still needs a human/operator judgment call, not autonomous action.
+    approval_report = approval_backlog_hygiene.backlog_report()
+    real_pending = [
+        c for c in approval_backlog_hygiene.classify_all()
+        if c.category in (approval_backlog_hygiene.Category.TRUE_FOUNDER_GATE,
+                          approval_backlog_hygiene.Category.NEEDS_FOUNDER_OR_OPERATOR_JUDGMENT)
+    ]
 
     lessons: list[str] = []
     from evolution import proposal as proposal_mod
@@ -626,6 +655,13 @@ def _gather_studio_evidence() -> dict[str, Any]:
 
     health = organ_discovery.studio_health_summary()
 
+    # mission.py's own real Missions (distinct from campaign_mod's
+    # "active_missions" above — two real, currently-separate tracking
+    # systems; both are real, neither fabricated, see this session's own
+    # census notes) — top-priority few, not a full dump.
+    real_missions = sorted(mission.list_all(), key=lambda m: -m.priority)[:8]
+    status = studio_status_mod.collect()
+
     return {
         "as_of": datetime.now(timezone.utc).isoformat(),
         # pending_founder_requests deliberately listed FIRST — it's the
@@ -633,12 +669,25 @@ def _gather_studio_evidence() -> dict[str, Any]:
         # questions, and earlier context is weighted more reliably by the
         # local model than a field buried lower in the evidence bundle.
         "pending_founder_requests": [
-            {"subject": p["payload"]["subject"], "finding": p["payload"]["finding"], "created_at": p["created_at"]}
-            for p in pending
+            {"subject": c.reason, "category": c.category.value, "job_id": c.job_id}
+            for c in real_pending
         ],
+        "pending_founder_requests_raw_count_excluding_test_noise": f"{approval_report.pending_real} real "
+            f"of {approval_report.pending_total} raw pending ({approval_report.synthetic_noise} were test/synthetic)",
         "recent_autonomous_cycle_history": history,
         "latest_cycle_status": latest.final_status if latest else "no cycles recorded yet",
         "latest_cycle_started_at": latest.started_at if latest else None,
+        "real_missions": [
+            {"mission_id": m.mission_id, "goal": m.goal, "state": m.state, "priority": m.priority}
+            for m in real_missions
+        ],
+        "real_workitem_summary": status.workitems_by_state,
+        "real_workitem_total": status.workitems_total,
+        "real_recent_failures_last_24h": status.anomalies_new_failure,
+        "real_validation_failures": status.validation_failures_real,
+        "real_canary_failures": status.canary_failures_real,
+        "real_maintenance_findings": status.maintenance_findings_active,
+        "unclaimed_registered_divisions": status.registry_candidates_unclaimed,
         "active_missions": [
             {"objective": c.objective, "status": c.status, "priority": c.priority} for c in active_missions
         ],
