@@ -597,9 +597,33 @@ def _maybe_run_continuous_stewardship_phase(record: CycleRecord) -> None:
         # own docstring for why this is needed (the existing next_priority_
         # source only ever surfaces the single current GOVERNING rank).
         secondary_missions_ensured = _ensure_authorized_secondary_priority_missions()
+        # WHOLE_QUEUE_MISSION_REGISTRATION (2026-09-08): the two sources
+        # above only ever surface ONE rank at a time (the current GOVERNING
+        # rank, plus one hardcoded authorized secondary) — the other ~8
+        # real ranks in the Founder's own durable priority queue had NO
+        # Mission tracking record at all until manually run once, off-cycle,
+        # this campaign. founder_priority_backlog_discovery.create_missions_
+        # for_unrepresented_ranks() closes that generically for every rank,
+        # not just the hardcoded ones — but is bounded to the EXACT SAME
+        # safety envelope this whole phase already exercises every cycle
+        # for the GOVERNING rank above (a bare mission.create_mission()
+        # registration record only: no WorkItem, no dispatch, no scheduler
+        # engagement, idempotent via the same fingerprint mechanism). The
+        # real downstream protection boundary (whether a Mission's
+        # registration record may be turned into dispatchable WorkGraph
+        # work) remains entirely at ensure_proposal_for_founder_priority_
+        # mission()'s own AUTHORIZED_REAL_WORK_GOVERNING_IDS allowlist,
+        # untouched and unbypassed by this — this only ever creates the
+        # SAME kind of inert tracking record the governing-rank path above
+        # already creates for every rank including protected ones.
+        import founder_priority_backlog_discovery
+        backlog_missions_created = [
+            m.mission_id for m in founder_priority_backlog_discovery.create_missions_for_unrepresented_ranks()
+        ]
         record.mission_stewardship_phase = {
             "ran": True,
             "secondary_missions_ensured": secondary_missions_ensured,
+            "backlog_missions_created": backlog_missions_created,
             **continuous_stewardship.continuous_stewardship_pass(
                 self_session_id=CANONICAL_CYCLE_SESSION_ID,
                 next_priority_source=_founder_top10_priority_source,
