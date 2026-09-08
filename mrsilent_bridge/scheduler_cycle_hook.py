@@ -1,10 +1,24 @@
 """
 Scheduler Cycle Hook — the precise, tested integration point for wiring
 scheduler.py into the real mrsilent-autonomous-cycle.timer -> run_cycle()
-path, and the exact specification for the one remaining edit this slice
-deliberately does NOT make.
+path.
 
-WHY THE WIRING EDIT ITSELF IS NOT IN THIS COMMIT (2026-09-04):
+WIRING STATUS UPDATE (2026-09-08, Domain-B truthfulness audit): the
+integration this module's docstring originally specified (below, preserved
+for its historical reasoning) has LANDED — confirmed live in autonomous_
+cycle.py's Phase T (`scheduler_cycle_hook.run_scheduler_phase(executor_fn=
+general_workitem_executor.make_general_executor())`), and confirmed
+operating naturally across many real, untriggered mrsilent-autonomous-
+cycle.timer firings this session (every cycle receipt's own
+`workgraph_scheduler_phase` field). The two blockers named below (this
+worktree's untracked-import wall; the peer session "pulse5-core-9e") are
+both resolved/moot — this is the live checkout, all five previously-
+untracked modules import and run cleanly, and the peer session's edit is
+the one now live. Left unedited below rather than deleted, matching this
+campaign's own convention of annotating stale reasoning rather than
+erasing it.
+
+WHY THE WIRING EDIT ITSELF WAS NOT IN THIS COMMIT (2026-09-04, historical):
 
 autonomous_cycle.py's own module-level imports (campaign, capability_
 registry, local_model_health, omni_registry_stewardship, organ_discovery)
