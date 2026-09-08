@@ -662,6 +662,23 @@ def _gather_studio_evidence() -> dict[str, Any]:
     real_missions = sorted(mission.list_all(), key=lambda m: -m.priority)[:8]
     status = studio_status_mod.collect()
 
+    # DOMAIN_G_COVERAGE_AUDIT (2026-09-08): a real Founder question this
+    # evidence bundle previously had no field for — "what did you repair?"
+    # and "what are you doing next?" — both answerable from the SAME
+    # latest real cycle record every other field here already reads, no
+    # new source. reconciled_canary/reconciled_terminal/repair_retried are
+    # real, already-tested workgraph_scheduler_phase counters (see
+    # proposal_work_bridge.py and work_graph.py); RUNNABLE is the real
+    # WorkGraph count of what the next natural cycle will actually pick up
+    # — never a guess or a plan this function invents itself.
+    wg_phase = (latest.workgraph_scheduler_phase or {}) if latest else {}
+    wg_status = wg_phase.get("work_graph_status", {}) or {}
+    repairs_this_cycle = {
+        "canary_reconciled": wg_phase.get("reconciled_canary", 0),
+        "terminal_state_reconciled": wg_phase.get("reconciled_terminal", 0),
+        "repair_retried": len(wg_phase.get("repair_retried", []) or []),
+    }
+
     return {
         "as_of": datetime.now(timezone.utc).isoformat(),
         # pending_founder_requests deliberately listed FIRST — it's the
@@ -693,6 +710,8 @@ def _gather_studio_evidence() -> dict[str, Any]:
         ],
         "recent_lessons_learned": lessons,
         "studio_health_by_engine_and_provider": health.get("entries", []),
+        "real_repairs_last_cycle": repairs_this_cycle,
+        "runnable_now_next_natural_cycle_will_pick_up": wg_status.get("RUNNABLE", 0),
     }
 
 
