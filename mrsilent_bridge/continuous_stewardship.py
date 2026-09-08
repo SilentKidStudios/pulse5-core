@@ -172,10 +172,25 @@ def ensure_proposal_for_founder_priority_mission(m: mission.Mission) -> dict[str
     deduped as already open, that one is reused; only when genuinely
     nothing exists or every match is terminal does this create anything
     new, mirroring signal_governing_priority_needs_proposal()'s exact
-    "genuinely nothing to wait on" condition."""
-    governing_id = (m.provenance or {}).get("governing_id")
+    "genuinely nothing to wait on" condition.
+
+    RANK_ID_FALLBACK gap-closure (2026-09-08, real natural-cycle evidence):
+    a mission created by founder_priority_backlog_discovery.py's full-queue
+    registration stamps its identity under provenance["rank_id"], not
+    provenance["governing_id"] (only the older, single-governing-rank
+    creation path — see autonomous_cycle.py — uses "governing_id"). Before
+    this fix, the newly Founder-authorized ranks 3/4/5/7/8/9/10 all hit
+    "mission has no governing_id provenance" and never even reached the
+    allowlist check below — confirmed live: the first natural cycle after
+    widening AUTHORIZED_REAL_WORK_GOVERNING_IDS still reported all 7 as
+    inapplicable for exactly this reason, before this fix landed. rank_id
+    is exactly the same identifier shape the allowlist itself is keyed by
+    (e.g. "SILENT_HANDS_WORKER_SWARM"), so falling back to it here is not
+    a new concept — it is recognizing the SAME identity under its other
+    real name, nothing more."""
+    governing_id = (m.provenance or {}).get("governing_id") or (m.provenance or {}).get("rank_id")
     if not governing_id:
-        return {"applicable": False, "reason": "mission has no governing_id provenance"}
+        return {"applicable": False, "reason": "mission has no governing_id/rank_id provenance"}
     if governing_id not in AUTHORIZED_REAL_WORK_GOVERNING_IDS:
         return {"applicable": False, "reason": f"governing_id {governing_id!r} is not in this session's authorized allowlist"}
 

@@ -57,8 +57,32 @@ def test_newly_authorized_rank_gets_one_bounded_founder_gated_proposal(monkeypat
     assert p.risk_score == "founder_gated", "a newly-created proposal from this path must always be founder_gated"
     assert p.status == proposal_mod.ProposalStatus.OBSERVED
 
+
+def test_rank_id_provenance_is_recognized_not_just_governing_id(monkeypatch, tmp_path):
+    """RANK_ID_FALLBACK gap-closure (2026-09-08) — real natural-cycle
+    evidence: founder_priority_backlog_discovery.py's full-queue missions
+    (the real, live shape of all 7 newly-authorized ranks) stamp identity
+    under provenance["rank_id"], not "governing_id". The first real natural
+    cycle after widening the allowlist proved this mattered: all 7 still
+    reported "mission has no governing_id provenance" and never even
+    reached the allowlist check. This is the regression guard."""
+    _fresh(monkeypatch, tmp_path)
+    m = mission.create_mission(
+        "Founder Top-10 rank 8: TH3S1L3NTK1D_STUDIOS_WEBSITE",
+        origin="founder_top10_priority_backlog",
+        provenance={"source": "founder_top10_priority_governor_full_queue",
+                    "rank": 8, "rank_id": "TH3S1L3NTK1D_STUDIOS_WEBSITE"},
+    )
+
+    result = cs.ensure_proposal_for_founder_priority_mission(m)
+
+    assert result["applicable"] is True, result
+    assert result["action"] == "created_new"
+    p = proposal_mod.load(result["proposal_id"])
+    assert p.risk_score == "founder_gated"
+
     reloaded = mission.load(m.mission_id)
-    assert f"proposal:{proposal_id}" in reloaded.root_work_item_ids
+    assert f"proposal:{result['proposal_id']}" in reloaded.root_work_item_ids
 
 
 def test_ensure_is_idempotent_no_duplicate_proposal(monkeypatch, tmp_path):
