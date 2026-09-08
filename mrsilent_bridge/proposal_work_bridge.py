@@ -108,6 +108,22 @@ def _needs_refinement(p: "proposal_mod.Proposal") -> bool:
     return p.risk_score == "founder_gated" and not proposal_mod.is_decision_ready(p)
 
 
+# DOMAIN_F_TRUTHFULNESS gap-closure (2026-09-08): public aliases so
+# evolution/observe.py's authority-block classification (a completely
+# separate call site, autonomous_cycle.py's Founder Top-10 truthful-state
+# fields) can reuse these EXACT same predicates instead of re-deriving its
+# own, less precise notion of "founder-gated". Real gap this closed: a
+# founder_gated-but-not-yet-decision-ready proposal (e.g. 46aef9b0, missing
+# every completeness-gate field) was reported as "awaiting explicit Founder
+# review/approval" — a real yes/no gate — when it actually needs someone to
+# refine/scope it first; there was nothing yet for a Founder to review, the
+# exact situation _needs_refinement()'s own docstring already names. Never
+# renames or removes the private names below — every existing internal call
+# site is untouched.
+founder_gate_state = _founder_gate_state
+needs_refinement = _needs_refinement
+
+
 def upsert_workitems_from_proposals(
     *, self_session_id: str = "proposal-bridge",
     reconcile_orphaned_canary_fn: Callable[[str], Any] | None = None,
@@ -160,8 +176,45 @@ def upsert_workitems_from_proposals(
     updated = 0
     left_untouched = 0
     reconciled_canary = 0
+    reconciled_terminal = 0
     for p in proposal_mod.list_all():
         if p.status in proposal_mod.CLOSED_STATUSES:
+            # DOMAIN_F_TRUTHFULNESS gap-closure (2026-09-08): a proposal can
+            # close (REJECTED/ROLLED_BACK/PROMOTED) via a path OTHER than
+            # make_advance_executor()'s own classify-and-mark-terminal branch
+            # -- real, live evidence: founder_request.retire_for_backlog_
+            # hygiene() closes a proposal directly (evolution/proposal.py::
+            # advance()) with zero WorkGraph awareness. Before this fix, the
+            # WorkItem for such a proposal was frozen forever in whatever
+            # non-terminal state it last held (real cases: 4 real WorkItems
+            # stuck at blocked_founder, one stuck at completed, all backing
+            # proposals that had already reached a real, final REJECTED
+            # verdict) -- a stale WorkItem-state-vs-proposal-status mismatch,
+            # never dangerous (a closed proposal is never re-dispatched
+            # either way, see the `continue` this replaces) but genuinely
+            # untruthful: e.g. BLOCKED_FOUNDER counts kept including items a
+            # Founder had nothing left to decide on. Reconciles the WorkItem
+            # to the ONE terminal state that actually matches the proposal's
+            # own final verdict -- PROMOTED -> COMPLETED, everything else
+            # closed (REJECTED/ROLLED_BACK) -> TERMINAL_FAILED -- preserving
+            # full history via the normal _save() note, idempotent (a
+            # WorkItem already at the correct terminal state, or with no
+            # WorkItem at all yet, is left untouched; RUNNING/COMPLETED/
+            # TERMINAL_FAILED items reachable here are exactly the ones this
+            # branch itself can already correctly produce).
+            work_id = workitem_id_for_proposal(p.proposal_id)
+            existing = wg.load(work_id)
+            if existing is not None and existing.state not in (wg.WorkState.RUNNING,):
+                target_terminal = (
+                    wg.WorkState.COMPLETED if p.status == proposal_mod.ProposalStatus.PROMOTED
+                    else wg.WorkState.TERMINAL_FAILED
+                )
+                if existing.state != target_terminal:
+                    if target_terminal == wg.WorkState.COMPLETED:
+                        wg.mark_completed(work_id, result=existing.result)
+                    else:
+                        wg.mark_terminal_failed(work_id, result=existing.result)
+                    reconciled_terminal += 1
             continue  # closed proposals are history, not schedulable work
 
         # CANARY_RECONCILIATION gap-closure (2026-09-08): a proposal orphaned
@@ -326,7 +379,7 @@ def upsert_workitems_from_proposals(
             left_untouched += 1
 
     return {"created": created, "updated": updated, "left_untouched": left_untouched,
-            "reconciled_canary": reconciled_canary}
+            "reconciled_canary": reconciled_canary, "reconciled_terminal": reconciled_terminal}
 
 
 def _classify_advancement_result(result: Any) -> dict[str, Any]:

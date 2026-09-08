@@ -32,6 +32,7 @@ from typing import Any
 
 import audit
 import capability_registry
+import proposal_work_bridge  # reuse the SAME founder-gate/needs-refinement predicates — see classify_governing_priority_proposals()
 from evolution import advance as advance_mod  # reuse the SAME eligibility semantics
 # advance_eligible() already uses (advance_mod._eligible()) -- never a second
 # risk/eligibility policy, see classify_governing_priority_proposals() below.
@@ -389,16 +390,34 @@ class GoverningPriorityProposalState:
     a real deadlock (mechanically proven 2026-09-03, commit e240d80 gap)."""
     matches: list[Any]
     actionable: list[Any]          # advance_mod._eligible() is True for these -- the existing timer already picks them up unattended, no gate involved
-    founder_gated_open: list[Any]  # status not in CLOSED_STATUSES, not actionable -- a real, unresolved Founder gate
+    founder_gated_open: list[Any]  # DOMAIN_F_TRUTHFULNESS (2026-09-08): genuinely decision-ready (proposal_work_bridge.needs_refinement() is False) AND not yet actionable -- a REAL, unresolved Founder gate, never anything less.
+    needs_refinement_open: list[Any]  # founder_gated but NOT yet decision-ready (proposal_work_bridge.needs_refinement() is True) -- nothing yet for a Founder to review; needs scoping, not a Founder decision. Never reported as a Founder gate.
     terminal_only: bool            # matches exist but EVERY one is CLOSED_STATUSES (rejected/promoted/rolled_back) -- nothing left to wait on
 
 
 def classify_governing_priority_proposals(governing_priority_id: str | None) -> GoverningPriorityProposalState:
     """Reusable by both the OBSERVE bridge signal below and
     autonomous_cycle.py's founder_top10 truthful-state fields -- single
-    source of truth, computed once per cycle, not re-derived twice."""
+    source of truth, computed once per cycle, not re-derived twice.
+
+    DOMAIN_F_TRUTHFULNESS gap-closure (2026-09-08): founder_gated_open used
+    to bucket EVERY open, non-actionable match together regardless of WHY
+    advance_mod._eligible() said no -- conflating a genuine, decision-ready
+    Founder gate with a founder_gated-but-not-yet-scoped proposal (nothing
+    there yet to review), and even a proposal whose risk_score isn't
+    founder_gated at all. Real, live incident this closes: proposal
+    46aef9b0-ae21-4030-80a4-7f65efb9636e (Founder Top-10 rank 1) is
+    risk_score=='founder_gated' but proposal_completeness() reports it
+    missing every completeness field -- autonomous_cycle.py's authority_
+    blocks was reporting "awaiting explicit Founder review/approval" for
+    it, a real yes/no gate, when what's actually missing is scope/
+    refinement, exactly proposal_work_bridge.needs_refinement()'s own
+    documented distinction (mirrors BLOCKED_FOUNDER vs BLOCKED_REFINEMENT
+    there). Reuses that EXACT predicate -- never a second, divergent
+    definition of "founder-gated" -- so the two call sites can never
+    silently drift apart again."""
     if not governing_priority_id:
-        return GoverningPriorityProposalState([], [], [], False)
+        return GoverningPriorityProposalState([], [], [], [], False)
     matches = [
         p for p in proposal_mod.list_all()
         if governing_priority_id in (p.observed_weakness or "") or governing_priority_id in (p.proposed_upgrade or "")
@@ -406,9 +425,12 @@ def classify_governing_priority_proposals(governing_priority_id: str | None) -> 
     actionable = [p for p in matches if advance_mod._eligible(p)[0]]
     actionable_ids = {p.proposal_id for p in actionable}
     open_matches = [p for p in matches if p.status not in proposal_mod.CLOSED_STATUSES]
-    founder_gated_open = [p for p in open_matches if p.proposal_id not in actionable_ids]
+    open_not_actionable = [p for p in open_matches if p.proposal_id not in actionable_ids]
+    needs_refinement_open = [p for p in open_not_actionable if proposal_work_bridge.needs_refinement(p)]
+    needs_refinement_ids = {p.proposal_id for p in needs_refinement_open}
+    founder_gated_open = [p for p in open_not_actionable if p.proposal_id not in needs_refinement_ids]
     terminal_only = bool(matches) and not open_matches
-    return GoverningPriorityProposalState(matches, actionable, founder_gated_open, terminal_only)
+    return GoverningPriorityProposalState(matches, actionable, founder_gated_open, needs_refinement_open, terminal_only)
 
 
 def signal_governing_priority_needs_proposal(governing_priority_id: str | None) -> list[Observation]:

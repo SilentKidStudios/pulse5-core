@@ -54,10 +54,19 @@ FAILURES: list[str] = []
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
+    # PYTEST_TRUTHFULNESS gap-closure (2026-09-08) — same real bug already
+    # fixed in test_authority_policy_negation_aware.py and test_founder_
+    # approval_to_implementation_authority.py: a print-and-record-only
+    # check() makes pytest report every collected test here as "passed"
+    # regardless of what check() actually found. Found here by direct
+    # evidence: this file's own "live" tests silently passed while directly
+    # querying the same real store showed their hardcoded assumptions
+    # (proposal 937a60b8's status, a match count of 2) had gone stale.
     status = "PASS" if condition else "FAIL"
     print(f"[{status}] {name}" + (f" — {detail}" if detail and not condition else ""))
     if not condition:
         FAILURES.append(name)
+    assert condition, f"{name}" + (f" — {detail}" if detail else "")
 
 
 def _cleanup(proposal_id: str, note: str) -> None:
@@ -136,18 +145,35 @@ def test_live_governing_rank_already_proposed_is_not_duplicated() -> None:
 
 
 def test_live_rank1_state_is_founder_gated_open_not_actionable() -> None:
-    """Live proof of the exact deadlock this repair closes: real Rank-1 has
-    one REJECTED (terminal) low-risk proposal and one OBSERVED founder_gated
-    proposal. The tri-state classification must report founder_gated_open
-    (a real, unresolved gate) and NOT actionable and NOT terminal_only --
-    this is what drives autonomous_cycle.py's authority_block instead of a
-    misleading "none -- re-run later"."""
+    """Live proof against the real store — DOMAIN_F_TRUTHFULNESS fix
+    (2026-09-08): this test originally hardcoded an exact match count (2)
+    and a specific proposal_id (937a60b8...) in founder_gated_open. Real
+    evidence found running this suite: this file's own check() never
+    actually asserted (see check()'s own PYTEST_TRUTHFULNESS fix above),
+    so this test had been silently reporting PASS while those hardcoded
+    values drifted out of date (the real Rank-1 match count grew past 2,
+    and 937a60b8 itself has since been closed) — never caught until the
+    assert was added. Rewritten to prove the real, current, durable
+    invariant instead of a frozen snapshot: whatever proposal 46aef9b0
+    (the real, live, incomplete Rank-1 placeholder this campaign's own
+    completeness-gate audit traced) is, it must be classified as needing
+    refinement, never as an open founder gate — and no currently-open
+    Rank-1 match may be BOTH founder_gated_open and needs_refinement_open
+    at once (the two-way split must stay a true partition)."""
     st = observe.classify_governing_priority_proposals("OMNISIM_AND_ORACLE_STUDIO_WIDE_ACTIVATION")
-    check("live Rank-1 has 2 known matches", len(st.matches) == 2, str([p.proposal_id for p in st.matches]))
-    check("live Rank-1 has zero actionable proposals (the low-risk one was rejected)", st.actionable == [])
-    check("live Rank-1 has exactly the founder_gated proposal open",
-          [p.proposal_id for p in st.founder_gated_open] == ["937a60b8-43d7-489c-b20a-645bc9879f10"],
-          str([p.proposal_id for p in st.founder_gated_open]))
+    open_ids = {p.proposal_id for p in st.matches if p.status not in proposal_mod.CLOSED_STATUSES}
+    gated_ids = {p.proposal_id for p in st.founder_gated_open}
+    refine_ids = {p.proposal_id for p in st.needs_refinement_open}
+    check("open Rank-1 matches split cleanly into founder_gated_open + needs_refinement_open, no overlap",
+          gated_ids.isdisjoint(refine_ids), str((gated_ids, refine_ids)))
+    check("every open match is accounted for in exactly one of the two buckets",
+          gated_ids | refine_ids == open_ids - {p.proposal_id for p in st.actionable},
+          str((open_ids, st.actionable, gated_ids, refine_ids)))
+    if "46aef9b0-ae21-4030-80a4-7f65efb9636e" in open_ids:
+        check("the real, live, incomplete Rank-1 placeholder (46aef9b0) is classified as "
+              "needing refinement, never as an open Founder gate",
+              "46aef9b0-ae21-4030-80a4-7f65efb9636e" in refine_ids
+              and "46aef9b0-ae21-4030-80a4-7f65efb9636e" not in gated_ids)
     check("live Rank-1 is NOT terminal_only (the founder_gated one is still open)", st.terminal_only is False)
 
 
@@ -304,6 +330,25 @@ def test_founder_gated_only_match_would_surface_truthful_authority_block() -> No
     p = proposal_mod.create(
         observed_weakness=f"an already-scoped but founder_gated delta for {rank_id}",
         proposed_upgrade="n/a", risk_score="founder_gated", origin="manual")
+    # DOMAIN_F_TRUTHFULNESS (2026-09-08): this fixture's own docstring/text
+    # always intended "already-scoped" — classify_governing_priority_
+    # proposals() now correctly routes a founder_gated-but-NOT-decision-
+    # ready proposal to needs_refinement_open instead of founder_gated_open
+    # (see that function's own docstring for the real incident this closed).
+    # Made genuinely decision-ready here, matching every other founder_
+    # gated test fixture in this campaign (e.g. test_proposal_work_bridge.
+    # py's _complete_founder_gated()), so this test still exercises the
+    # TRUE founder-gate condition it names, not the refinement gate.
+    p = proposal_mod.refine(
+        p.proposal_id,
+        implementation_scope="test fixture: bounded, self-contained change under test",
+        non_file_scope="test fixture — no real canonical files touched",
+        validation_plan="test fixture: validation.validate() on the sandbox output",
+        canary_plan="test fixture: independent re-validation pass",
+        paid_resources_required=False, credential_changes_required=False,
+        production_promotion_required=False, destructive_action_required=False,
+        model_change_required=False, isolation_change_required=False, campaign_collision=False,
+    )
     try:
         st = observe.classify_governing_priority_proposals(rank_id)
         would_block = bool(st.founder_gated_open) and not st.actionable

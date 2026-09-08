@@ -372,6 +372,69 @@ def test_repair_budget_exhaustion_blocked_founder_is_not_auto_released(monkeypat
     )
 
 
+def test_closed_proposal_reconciles_a_stale_blocked_workitem_to_terminal_failed(monkeypatch, tmp_path):
+    """DOMAIN_F_TRUTHFULNESS gap-closure (2026-09-08): real, live evidence —
+    founder_request.retire_for_backlog_hygiene() closes a proposal directly
+    (evolution/proposal.py::advance()) with zero WorkGraph awareness, so a
+    WorkItem parked BLOCKED_FOUNDER before that closure was frozen there
+    forever (population's own `if p.status in CLOSED_STATUSES: continue`
+    never touches it again) — a stale WorkItem-state-vs-proposal-status
+    mismatch. Real cases this closed: 4 real WorkItems stuck at
+    blocked_founder backing proposals that had already reached a final
+    REJECTED verdict via exactly this path."""
+    _fresh(monkeypatch, tmp_path)
+    p = proposal_mod.create("weak spot", "fix it", risk_score="low")
+    bridge.upsert_workitems_from_proposals()
+    work_id = bridge.workitem_id_for_proposal(p.proposal_id)
+    wg.mark_blocked_founder(work_id, note="test", source="orphaned_status")
+    assert wg.load(work_id).state == wg.WorkState.BLOCKED_FOUNDER
+
+    # Closes the proposal via a path that never touches the WorkGraph at
+    # all — exactly what retire_for_backlog_hygiene() does in the real
+    # incident this test is grounded in.
+    proposal_mod.advance(p.proposal_id, proposal_mod.ProposalStatus.REJECTED, note="closed outside WorkGraph")
+
+    counts = bridge.upsert_workitems_from_proposals()
+    assert counts["reconciled_terminal"] == 1
+    reconciled = wg.load(work_id)
+    assert reconciled.state == wg.WorkState.TERMINAL_FAILED
+
+
+def test_promoted_proposal_reconciles_a_stale_workitem_to_completed(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    p = proposal_mod.create("weak spot", "fix it", risk_score="low")
+    bridge.upsert_workitems_from_proposals()
+    work_id = bridge.workitem_id_for_proposal(p.proposal_id)
+    wg.mark_blocked_founder(work_id, note="test", source="orphaned_status")
+
+    proposal_mod.advance(p.proposal_id, proposal_mod.ProposalStatus.PROMOTED, note="promoted outside WorkGraph")
+
+    counts = bridge.upsert_workitems_from_proposals()
+    assert counts["reconciled_terminal"] == 1
+    assert wg.load(work_id).state == wg.WorkState.COMPLETED
+
+
+def test_terminal_reconciliation_is_idempotent_and_never_touches_running(monkeypatch, tmp_path):
+    _fresh(monkeypatch, tmp_path)
+    p1 = proposal_mod.create("weak spot 1", "fix it", risk_score="low")
+    p2 = proposal_mod.create("weak spot 2", "fix it", risk_score="low")
+    bridge.upsert_workitems_from_proposals()
+    work_id1 = bridge.workitem_id_for_proposal(p1.proposal_id)
+    work_id2 = bridge.workitem_id_for_proposal(p2.proposal_id)
+    wg.claim(work_id2, owner="worker-a")  # RUNNING — must never be force-terminated
+
+    proposal_mod.advance(p1.proposal_id, proposal_mod.ProposalStatus.REJECTED, note="closed")
+    proposal_mod.advance(p2.proposal_id, proposal_mod.ProposalStatus.REJECTED, note="closed while its WorkItem is genuinely RUNNING")
+
+    first = bridge.upsert_workitems_from_proposals()
+    assert first["reconciled_terminal"] == 1  # only work_id1 — work_id2 is RUNNABLE->claimed, never blocked_founder-parked
+    assert wg.load(work_id1).state == wg.WorkState.TERMINAL_FAILED
+    assert wg.load(work_id2).state == wg.WorkState.RUNNING, "a genuinely RUNNING item must never be force-terminated"
+
+    second = bridge.upsert_workitems_from_proposals()
+    assert second["reconciled_terminal"] == 0, "already-reconciled terminal state must be idempotent, never re-touched"
+
+
 def test_owner_path_from_source_paths_enables_collision_protection(monkeypatch, tmp_path):
     """An owned/conflicting path is not concurrently dispatched: a proposal
     naming a source_path that collides with an externally-owned session
@@ -494,7 +557,7 @@ def test_restart_reload_preserves_durable_state_no_duplication(monkeypatch, tmp_
     # already on disk (tmp_path) -- re-running population must see exactly
     # the same, single, completed record.
     counts = bridge.upsert_workitems_from_proposals()
-    assert counts == {"created": 0, "updated": 0, "left_untouched": 1, "reconciled_canary": 0}
+    assert counts == {"created": 0, "updated": 0, "left_untouched": 1, "reconciled_canary": 0, "reconciled_terminal": 0}
     assert len(wg.list_all()) == 1
     assert wg.load(work_id).state == wg.WorkState.COMPLETED
 
@@ -595,11 +658,11 @@ def test_case_F_repeated_population_remains_idempotent_for_deferred(monkeypatch,
     p = proposal_mod.create("proactive scouting finding", "n/a", risk_score="low")
     proposal_mod.defer(p.proposal_id, until="indefinite", reason="park")
     first = bridge.upsert_workitems_from_proposals()
-    assert first == {"created": 1, "updated": 0, "left_untouched": 0, "reconciled_canary": 0}
+    assert first == {"created": 1, "updated": 0, "left_untouched": 0, "reconciled_canary": 0, "reconciled_terminal": 0}
     second = bridge.upsert_workitems_from_proposals()
-    assert second == {"created": 0, "updated": 0, "left_untouched": 1, "reconciled_canary": 0}
+    assert second == {"created": 0, "updated": 0, "left_untouched": 1, "reconciled_canary": 0, "reconciled_terminal": 0}
     third = bridge.upsert_workitems_from_proposals()
-    assert third == {"created": 0, "updated": 0, "left_untouched": 1, "reconciled_canary": 0}
+    assert third == {"created": 0, "updated": 0, "left_untouched": 1, "reconciled_canary": 0, "reconciled_terminal": 0}
 
 
 def test_case_G_no_duplicate_workitems_for_deferred_proposal(monkeypatch, tmp_path):
