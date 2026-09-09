@@ -2088,6 +2088,267 @@ def test_decomposed_ledger_record_carries_real_files_touched_and_promotion_eligi
           "output.txt" in record.files_touched.get("added", []), record.files_touched)
 
 
+# ---- CANARY/INDEPENDENT-VALIDATION PERSISTENCE REPAIR (2026-09-09) -----
+#
+# Real, live incident: job c912b60a (proposal 08a37299, Founder Top-10
+# rank 4) had vres.passed=True and canary passed, but promotion_eligible
+# ended up False (independent-validation disagreement) -- yet
+# submit_job_decomposed() reported status="succeeded" anyway (it only
+# ever checked vres.passed/canary_result, never promotion_eligible) and
+# never persisted canary_result/independent_validation_result to the
+# ledger at all, so evolution/advance.py's caller had no way to
+# distinguish "real content failure" from "validator disagreement" and
+# printed a flatly incorrect "automatic validation failed".
+
+def _god3_validate_sequence(results: list[bool]):
+    """Feeds successive validation.validate() calls (vres, then cres) a
+    scripted pass/fail sequence, exactly like _god2_sequenced_runner does
+    for run_agent_loop."""
+    calls = {"n": 0}
+    it = iter(results)
+
+    def fake_validate(*a, **k):
+        calls["n"] += 1
+        try:
+            passed = next(it)
+        except StopIteration:
+            passed = results[-1]
+        return type("V", (), {"passed": passed, "to_json": lambda self, p=passed: {"passed": p, "checks": []}})()
+    return fake_validate, calls
+
+
+def _god3_file_writing_runner():
+    """A real file change is required for has_changes=True (the same
+    real-effect pattern test_decomposed_ledger_record_carries_real_files_
+    touched_and_promotion_eligible already uses) -- without it,
+    promotion_eligible is False regardless of validation/canary/
+    independent-validation outcome, which would make these persistence
+    tests exercise the wrong branch."""
+    def runner(task_text, workdir, *, model, provider, max_iterations, timeout_s, allowed_tools):
+        (workdir / "output.txt").write_text("real content")
+        return _god2_fake_run()
+    return runner
+
+
+def test_decomposed_primary_validation_pass_is_persisted() -> None:
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    fake_validate, _ = _god3_validate_sequence([True, True])
+    runner, _ = _god2_sequenced_runner([_god2_fake_run() for _ in range(3)])
+    harness.run_agent_loop = runner
+    _god2_validation.validate = fake_validate
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: primary validation persistence", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+
+    check("JobResult.validation reports passed=True", (r.validation or {}).get("passed") is True, r.validation)
+    record = job_ledger.load(r.job_id)
+    check("durable ledger validation_result.passed=True", (record.validation_result or {}).get("passed") is True, record.validation_result)
+
+
+def test_decomposed_canary_pass_is_persisted() -> None:
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    fake_validate, _ = _god3_validate_sequence([True, True])
+    runner, _ = _god2_sequenced_runner([_god2_fake_run() for _ in range(3)])
+    harness.run_agent_loop = runner
+    _god2_validation.validate = fake_validate
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: canary persistence", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+
+    check("JobResult.canary reports passed=True", (r.canary or {}).get("passed") is True, r.canary)
+    record = job_ledger.load(r.job_id)
+    check("REGRESSION: durable ledger canary_result is no longer dropped (was None before this repair)",
+          record.canary_result is not None, record.canary_result)
+    check("durable ledger canary_result.passed=True", (record.canary_result or {}).get("passed") is True, record.canary_result)
+
+
+def test_decomposed_independent_validation_pass_is_persisted() -> None:
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    original_recheck = harness.independent_validation.recheck
+    fake_validate, _ = _god3_validate_sequence([True, True])
+    runner = _god3_file_writing_runner()
+    harness.run_agent_loop = runner
+    _god2_validation.validate = fake_validate
+    harness.independent_validation.recheck = lambda *a, **k: type(
+        "IV", (), {"ran": True, "agrees_with_primary": True,
+                   "to_json": lambda self: {"ran": True, "agrees_with_primary": True}})()
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: independent validation agreement persistence", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+        harness.independent_validation.recheck = original_recheck
+
+    check("job reaches full success when independent validation agrees", r.status == "succeeded", r.status)
+    check("promotion_eligible=True when everything agrees", r.promotion_eligible is True, r.promotion_eligible)
+    record = job_ledger.load(r.job_id)
+    check("REGRESSION: durable ledger independent_validation_result is no longer dropped",
+          record.independent_validation_result is not None, record.independent_validation_result)
+    check("durable ledger independent_validation_result.agrees_with_primary=True",
+          (record.independent_validation_result or {}).get("agrees_with_primary") is True,
+          record.independent_validation_result)
+
+
+def test_decomposed_independent_validation_disagreement_blocks_promotion_with_correct_status() -> None:
+    """The exact real incident: validation.py + canary BOTH pass, but the
+    genuinely independent recheck disagrees. Must produce
+    status='succeeded_validator_disagreement' (never a bare 'succeeded'),
+    promotion_eligible=False, and both canary_result and
+    independent_validation_result durably persisted -- never silently
+    reported as 'automatic validation failed'."""
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    original_recheck = harness.independent_validation.recheck
+    fake_validate, _ = _god3_validate_sequence([True, True])
+    runner = _god3_file_writing_runner()
+    harness.run_agent_loop = runner
+    _god2_validation.validate = fake_validate
+    harness.independent_validation.recheck = lambda *a, **k: type(
+        "IV", (), {"ran": True, "agrees_with_primary": False,
+                   "to_json": lambda self: {"ran": True, "agrees_with_primary": False}})()
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: independent validation disagreement", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+        harness.independent_validation.recheck = original_recheck
+
+    check("REGRESSION: status is 'succeeded_validator_disagreement', not a misleading bare 'succeeded'",
+          r.status == "succeeded_validator_disagreement", r.status)
+    check("promotion_eligible=False on a genuine validator disagreement", r.promotion_eligible is False, r.promotion_eligible)
+    record = job_ledger.load(r.job_id)
+    check("ledger terminal_result matches the disagreement status, not 'succeeded'",
+          record.terminal_result == "succeeded_validator_disagreement", record.terminal_result)
+    check("ledger error_class is 'validator_disagreement', not the generic 'validation'",
+          record.error_class == "validator_disagreement", record.error_class)
+    check("REGRESSION: canary_result IS persisted even on a disagreement (was silently dropped before)",
+          record.canary_result is not None and record.canary_result.get("passed") is True, record.canary_result)
+    check("REGRESSION: independent_validation_result IS persisted (was silently dropped before)",
+          record.independent_validation_result is not None, record.independent_validation_result)
+    check("independent_validation_result correctly records the disagreement",
+          record.independent_validation_result.get("agrees_with_primary") is False, record.independent_validation_result)
+
+
+def test_decomposed_persistence_survives_reload() -> None:
+    """Persistence must be durable, not just present on the in-memory
+    JobResult -- a completely fresh job_ledger.load() (simulating a new
+    process) must see the same canary/independent_validation evidence."""
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    original_recheck = harness.independent_validation.recheck
+    fake_validate, _ = _god3_validate_sequence([True, True])
+    runner = _god3_file_writing_runner()
+    harness.run_agent_loop = runner
+    _god2_validation.validate = fake_validate
+    harness.independent_validation.recheck = lambda *a, **k: type(
+        "IV", (), {"ran": True, "agrees_with_primary": True,
+                   "to_json": lambda self: {"ran": True, "agrees_with_primary": True}})()
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: reload persistence", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+        harness.independent_validation.recheck = original_recheck
+
+    reloaded = job_ledger.load(r.job_id)
+    check("a fresh load() sees the persisted canary_result", reloaded.canary_result is not None, reloaded.canary_result)
+    check("a fresh load() sees the persisted independent_validation_result",
+          reloaded.independent_validation_result is not None, reloaded.independent_validation_result)
+    check("a fresh load() sees the correct promotion_eligible", reloaded.promotion_eligible is True, reloaded.promotion_eligible)
+    check("a fresh load() sees the correct terminal_result", reloaded.terminal_result == "succeeded", reloaded.terminal_result)
+
+
+def test_decomposed_no_op_change_still_classified_correctly_not_as_disagreement() -> None:
+    """A real, pre-existing branch (_execute()'s 'elif not has_changes')
+    that this repair also had to preserve: validation+canary pass but
+    there are literally no file changes -- legitimate no-op success, never
+    conflated with a validator disagreement."""
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    fake_validate, _ = _god3_validate_sequence([True, True])
+    runner, _ = _god2_sequenced_runner([_god2_fake_run() for _ in range(3)])  # no files written by the runner
+    harness.run_agent_loop = runner
+    _god2_validation.validate = fake_validate
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: no-op no-changes", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+
+    check("no real file changes -> promotion_eligible=False", r.promotion_eligible is False, r.promotion_eligible)
+    check("no-op is reported as plain 'succeeded', not 'succeeded_validator_disagreement'",
+          r.status == "succeeded", r.status)
+    record = job_ledger.load(r.job_id)
+    check("ledger error_class is None for a legitimate no-op, not 'validator_disagreement'",
+          record.error_class is None, record.error_class)
+
+
+def test_decomposed_validation_failure_still_stops_before_canary_runs_and_is_never_persisted_as_success() -> None:
+    """A genuinely failed primary validation must never be converted into
+    success by this repair -- canary/independent_validation must never
+    even run, and status/error_class must stay exactly as before."""
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    recheck_calls = {"n": 0}
+    original_recheck = harness.independent_validation.recheck
+    harness.independent_validation.recheck = lambda *a, **k: recheck_calls.__setitem__("n", recheck_calls["n"] + 1)
+    runner, _ = _god2_sequenced_runner([_god2_fake_run() for _ in range(10)])
+    harness.run_agent_loop = runner
+    _god2_validation.validate = lambda *a, **k: type("V", (), {"passed": False, "to_json": lambda self: {"passed": False, "checks": []}})()
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: genuine validation failure unchanged", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+        harness.independent_validation.recheck = original_recheck
+
+    check("a genuine validation failure is never converted into success", r.status == "succeeded_validation_failed", r.status)
+    check("promotion_eligible stays False", r.promotion_eligible is False, r.promotion_eligible)
+    check("independent_validation.recheck is never called when primary validation never passes",
+          recheck_calls["n"] == 0, recheck_calls["n"])
+    record = job_ledger.load(r.job_id)
+    check("ledger error_class stays the generic 'validation', not 'validator_disagreement'",
+          record.error_class == "validation", record.error_class)
+
+
+def test_decomposed_reconciliation_is_idempotent_across_repeated_loads() -> None:
+    """Reading the same terminal job_ledger record twice must yield
+    byte-identical persisted evidence -- no reconciliation pass mutates it
+    on read."""
+    original_run = harness.run_agent_loop
+    original_validate = _god2_validation.validate
+    original_recheck = harness.independent_validation.recheck
+    fake_validate, _ = _god3_validate_sequence([True, True])
+    runner = _god3_file_writing_runner()
+    harness.run_agent_loop = runner
+    _god2_validation.validate = fake_validate
+    harness.independent_validation.recheck = lambda *a, **k: type(
+        "IV", (), {"ran": True, "agrees_with_primary": True,
+                   "to_json": lambda self: {"ran": True, "agrees_with_primary": True}})()
+    try:
+        r = harness.submit_job_decomposed("synthetic decomposed test: idempotent reload", requested_by="test")
+    finally:
+        harness.run_agent_loop = original_run
+        _god2_validation.validate = original_validate
+        harness.independent_validation.recheck = original_recheck
+
+    first = job_ledger.load(r.job_id)
+    second = job_ledger.load(r.job_id)
+    check("repeated load() calls return identical canary_result", first.canary_result == second.canary_result, (first.canary_result, second.canary_result))
+    check("repeated load() calls return identical independent_validation_result",
+          first.independent_validation_result == second.independent_validation_result,
+          (first.independent_validation_result, second.independent_validation_result))
+    check("repeated load() calls return identical terminal_result", first.terminal_result == second.terminal_result,
+          (first.terminal_result, second.terminal_result))
+
+
 # ---- OMNI_GOD_MODE_V1 PHASE 3: complexity classification / router integration ----
 
 _PHASE3_SYNTHETIC_COMPLEX_TASK = """
@@ -2382,8 +2643,26 @@ def test_TEST_FAILURE_live_deterministic_fixture_real_validation_and_repair() ->
           record.phases)
     check("VALID_PROGRESS_PRESERVED: calc.py from the implement phase survived the repair cycle",
           (Path(r.workdir) / "calc.py").exists(), r.workdir)
-    check("FALSE_SUCCESS=NO / FINAL_OUTCOME_CORRECT=YES: job only succeeded after the SECOND real pytest run genuinely passed",
-          r.status == "succeeded" and bool(r.validation) and r.validation.get("passed") is True, r.validation)
+    # CANARY/INDEPENDENT-VALIDATION PERSISTENCE REPAIR (2026-09-09) note:
+    # this fixture's real, unmocked evolution.independent_validation.
+    # recheck() genuinely disagrees here -- its own test-discovery
+    # mechanism reports "NO TESTS RAN" against this real pytest-style
+    # test_calc.py, while validation.py's real pytest subprocess genuinely
+    # passed 1/1. That disagreement was ALREADY happening before the
+    # persistence repair (recheck() was already called on every promotion-
+    # eligible path); the repair only stopped SILENTLY MASKING it as a
+    # bare "succeeded" (the exact bug this file's other new tests target)
+    # -- status is now honestly "succeeded_validator_disagreement", not a
+    # false "succeeded". A real, separate gap this incidentally surfaces
+    # (independent_validation.py's own test-discovery not recognizing
+    # pytest-authored tests) is OUT OF SCOPE for the persistence repair
+    # and intentionally not fixed here.
+    check("FALSE_SUCCESS=NO / FINAL_OUTCOME_CORRECT=YES: the SECOND real pytest run genuinely passed "
+          "(validation.py+canary), and the terminal status honestly reflects real evidence -- either full "
+          "success, or a genuine independent-validator disagreement, never silently masked as a false 'succeeded'",
+          bool(r.validation) and r.validation.get("passed") is True
+          and r.status in ("succeeded", "succeeded_validator_disagreement"),
+          (r.status, r.validation))
     test_check = next((c for c in (r.validation or {}).get("checks", []) if c.get("name") == "test_discovery_and_run"), None)
     check("the final validation evidence is a REAL, passing pytest subprocess run (not faked)",
           test_check is not None and test_check.get("passed") is True, test_check)

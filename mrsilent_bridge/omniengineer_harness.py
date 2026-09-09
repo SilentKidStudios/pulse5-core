@@ -2114,18 +2114,48 @@ def submit_job_decomposed(
                     promotion_eligible = False
 
         ended_at = datetime.now(timezone.utc).isoformat()
+        # CANARY/INDEPENDENT-VALIDATION PERSISTENCE REPAIR (2026-09-09):
+        # mirrors _execute()'s exact terminal-status taxonomy (its
+        # "elif not validation_result" / "elif not canary_result" /
+        # "elif not has_changes" / "elif not promotion_eligible" / "else"
+        # chain above) instead of collapsing every non-validation-failure
+        # outcome into a bare "succeeded"/"succeeded_canary_failed" pair.
+        # Real, live incident this closes: job c912b60a (proposal
+        # 08a37299, Founder Top-10 rank 4, 2026-09-09) -- vres.passed=True
+        # and canary passed, but promotion_eligible still ended up False
+        # (an independent-validation disagreement). The prior code here
+        # only ever checked vres.passed/canary_result to pick `status`,
+        # never promotion_eligible, so it reported status="succeeded"
+        # anyway -- and never passed canary_result or
+        # independent_validation_result to job_ledger.checkpoint() at
+        # all, so they were silently dropped from the durable record even
+        # though both had been computed above. evolution/advance.py's
+        # caller therefore had no way to distinguish "real content
+        # failure" from "validator disagreement" for a decomposed job,
+        # and printed a flatly incorrect "automatic validation failed"
+        # for a job whose own validation had actually passed.
         if not vres.passed:
             status = "succeeded_validation_failed"
+            error_class = "validation"
         elif not canary_result or not canary_result.get("passed"):
             status = "succeeded_canary_failed"
+            error_class = "validation"
+        elif not has_changes:
+            status = "succeeded"
+            error_class = None
+        elif not promotion_eligible:
+            status = "succeeded_validator_disagreement"
+            error_class = "validator_disagreement"
         else:
             status = "succeeded"
+            error_class = None
         ledger_state = JobState.COMPLETED if status == "succeeded" else JobState.FAILED
         job_ledger.checkpoint(
             job_id, ledger_state, terminal_result=status, phases=phases_state,
             attempted_models=attempted_models_all, validation_result=vres.to_json(),
+            canary_result=canary_result, independent_validation_result=independent_validation_result,
             files_touched=files_changed, promotion_eligible=promotion_eligible,
-            error_class=None if status == "succeeded" else "validation",
+            error_class=error_class,
         )
         result = JobResult(
             job_id=job_id, task=task, adapter=OMNI_ENGINEER_ID, model=attempted_models_all[-1] if attempted_models_all else model,
