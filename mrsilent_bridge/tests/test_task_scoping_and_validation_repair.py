@@ -701,6 +701,52 @@ def test_38_real_rank8_and_rank10_historical_sandboxes_now_validate_correctly() 
               result10.passed, result10.to_json()["checks"])
 
 
+def test_38b_canary_stage_also_honors_documentation_only_scope() -> None:
+    """REGRESSION for a real, live gap-of-the-gap: proposals f28acd02/
+    59a14cfb (ranks 8/10) passed PRIMARY validation under the new
+    documentation-only evidence path but then failed at the SEPARATE
+    canary re-check in advance_one(), because that canary_config was
+    built from scratch and never carried documentation_only_scope
+    through. Canary must apply the identical evidence-based rule as
+    primary validation, never a stricter one, end-to-end through the
+    real advance_one() canary stage."""
+    p = _p(observed_weakness="x", proposed_upgrade="y", risk_score="low", origin="test")
+    p = proposal_mod.refine(p.proposal_id, canary_plan="independent re-check of the documentation artifact",
+                             documentation_only_scope=True)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            workdir = Path(td)
+            (workdir / "ASSESSMENT.md").write_text("Real, non-empty documentation content.\n")
+            result = _run_fake_engine_to_canary(p, workdir, {"added": ["ASSESSMENT.md"], "modified": [], "removed": []})
+        check("REGRESSION: a documentation-only proposal with a declared canary_plan reaches promotion_candidate "
+              "through the REAL canary stage, not just primary validation",
+              result.final_status == "promotion_candidate", result.final_status)
+        reloaded = proposal_mod.load(p.proposal_id)
+        canary_note = next((h["note"] for h in reversed(reloaded.history) if h.get("status") == "canary"), "")
+        check("proposal history records CANARY_REQUIRED_AND_PASS, not a false CANARY_REQUIRED_AND_FAIL",
+              "CANARY_REQUIRED_AND_PASS" in canary_note, canary_note)
+    finally:
+        _cleanup(p.proposal_id, "test 38b cleanup")
+
+
+def test_38c_canary_still_fails_for_mixed_code_despite_documentation_only_declared() -> None:
+    """Anti-bypass at the canary layer too: a real .py file among the
+    canary-checked changes must still fail, even with
+    documentation_only_scope=True declared."""
+    p = _p(observed_weakness="x", proposed_upgrade="y", risk_score="low", origin="test")
+    p = proposal_mod.refine(p.proposal_id, canary_plan="independent re-check", documentation_only_scope=True)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            workdir = Path(td)
+            (workdir / "evil.py").write_text("import os\n")
+            result = _run_fake_engine_to_canary(p, workdir, {"added": ["evil.py"], "modified": [], "removed": []})
+        check("REGRESSION: a real .py file among canary-checked changes still fails canary "
+              "despite a false documentation_only_scope=True declaration",
+              result.final_status != "promotion_candidate", result.final_status)
+    finally:
+        _cleanup(p.proposal_id, "test 38c cleanup")
+
+
 def test_39_proposal_field_roundtrips_and_defaults_to_none() -> None:
     p = _p(observed_weakness="x", proposed_upgrade="y")
     try:

@@ -1348,8 +1348,23 @@ def advance_one(proposal_id: str, *, requested_by: str = "autonomous_pipeline") 
         # to it, and that commitment now actually forces real test execution
         # (see _validation_config_for_proposal()/validation.check_tests())
         # rather than a vacuous pass from an empty/no-op check.
+        # DOCUMENTATION_VALIDATION_SEMANTICS gap-closure (2026-09-09): real,
+        # live incident -- proposals f28acd02/59a14cfb (ranks 8/10) passed
+        # PRIMARY validation under the new documentation-only evidence path
+        # (_validation_config_for_proposal() correctly includes
+        # documentation_only_scope) but then failed at THIS separate,
+        # independent canary re-check, because canary_config here was built
+        # from scratch and never carried documentation_only_scope through --
+        # check_tests() during canary therefore fell back to demanding a
+        # nonexistent behavioral test file for the exact same real,
+        # evidence-confirmed documentation deliverable that had just passed
+        # primary validation. Canary must apply the identical documentation-
+        # only evidence rule as primary validation, never a stricter one.
         canary_required = bool(p.canary_plan)
-        canary_config = {"require_tests": canary_required} if canary_required else None
+        canary_config = (
+            {"require_tests": canary_required, "documentation_only_scope": bool(p.documentation_only_scope)}
+            if canary_required else None
+        )
         canary = validation.validate(Path(job.workdir), job.files_changed, config=canary_config)
         # Preserved EXACTLY as before this repair: ANY failing check blocks
         # promotion, required or not — canary_required only changes what
