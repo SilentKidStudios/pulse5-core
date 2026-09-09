@@ -48,6 +48,7 @@ import authority_policy  # noqa: E402
 import secret_path_policy  # noqa: E402
 from evolution import proposal as proposal_mod
 from evolution import advance as advance_mod  # noqa: E402
+from evolution import founder_view_filter  # noqa: E402
 STATE = ROOT / "mr_silent_spine" / "state"
 BUS_INBOX = ROOT / "mr_silent_spine" / "division_signal_bus" / "inbox"
 BUS_RECEIPTS = ROOT / "mr_silent_spine" / "division_signal_bus" / "receipts"
@@ -501,10 +502,34 @@ def continuum_status() -> dict:
         r = completed[0]
         latest_completed = {"work_id": r.job_id, "task": (r.task or "")[:200], "updated_at": r.updated_at}
 
+    # CONTINUUM_STATUS_FOUNDER_VIEW_FILTER_REPAIR (Founder-authorized
+    # 2026-09-09, TRUE WALK-AWAY V1 Domain A/E capability defect): this
+    # listing used to be every raw approval_state=="pending_approval"
+    # ledger record, unfiltered -- mixing real Founder-gated work with
+    # accumulated test/synthetic-acceptance artifacts (e.g. requested_by
+    # =="test", task text containing "synthetic"/"TEST-ONLY"). Reuses
+    # (never reimplements) the SAME classify_pending_item() classifier
+    # natural_language_status()'s own approvals count, founder_view_filter
+    # itself, and the Telegram synthetic-escalation filter already rely
+    # on -- one canonical classifier, applied consistently everywhere a
+    # Founder-facing pending listing is built, never a second competing
+    # one. Classification runs on the FULL task text (not the 200-char
+    # display truncation below) so a marker beyond that length is never
+    # missed. Filtering happens BEFORE the [:10] display slice, so real
+    # items are no longer pushed out of the top 10 by test noise ahead of
+    # them in job_ledger's own ordering -- a real, incidental visibility
+    # improvement, not just a count fix. Purely a read-time view filter:
+    # never marks a suppressed item approved/rejected/resolved/
+    # notification_sent, and never mutates the underlying ledger, proposal,
+    # or workgraph record -- identical guarantee founder_view_filter's own
+    # module docstring already makes for the App/Telegram surfaces.
     pending_gated = [
         {"work_id": r.job_id, "task": (r.task or "")[:200], "risk_class": r.risk_class}
         for r in records
         if r.approval_state == "pending_approval"
+        and founder_view_filter.classify_pending_item(
+            {"requested_by": r.requested_by, "payload": {"subject": r.task or "", "finding": ""}}
+        ) == founder_view_filter.CATEGORY_REAL_ACTIONABLE
     ][:10]
 
     ranks_not_complete = sorted(
