@@ -127,6 +127,63 @@ _NEGATION_TRAIL_CUES = re.compile(
 )
 _CLAUSE_BOUNDARY = re.compile(r"[.;\n]")
 
+# QUOTED_EXAMPLE_META_REFERENCE_FILTER (Founder-authorized 2026-09-09, real
+# false-positive incident: Rank 7 job 508048fc's task text asked the agent
+# to write a TEST proving a target module blocks auto-completion of any
+# item "whose id/note/action_type matches one of walkaway_advance.
+# PROTECTED_GATE_KEYWORDS (e.g. contains \"production_promotion\" or
+# \"credential\")" -- \bcredential FOUNDER_GATED the whole job even though
+# "credential" here is a quoted EXAMPLE gate-name string inside a spec
+# describing a protection mechanism, never an instruction to touch one).
+# The existing negation-aware filter above does not (and should not)
+# handle this: there is no negation cue here at all ("no"/"do not"/etc.) --
+# the missing signal is entirely different: "this is a quoted literal being
+# named as an example/keyword-reference," not "this is being prohibited."
+#
+# Deliberately narrow, BOTH conditions required (never either alone):
+#   1. the matched keyword text itself is DIRECTLY quoted -- a quote
+#      character immediately precedes the match AND immediately follows
+#      it (not merely "somewhere in the sentence" -- adjacent, so quoting
+#      an unrelated word elsewhere can never launder a real instruction
+#      sitting right next to it unquoted);
+#   2. within a bounded window immediately before/after the quoted
+#      occurrence, an explicit example/keyword-reference/spec/matching-rule
+#      cue is present (_META_REFERENCE_CUES below) -- a bare quoted word
+#      with no such framing still escalates exactly as before.
+# The window is wider than a single clause (unlike the negation check)
+# specifically because clause-splitting on newline (this task's own
+# numbered list wraps mid-sentence) would otherwise sever the quoted word
+# from the very words ("matches", "PROTECTED_GATE_KEYWORDS", "contains")
+# that establish it as an example -- but still bounded (not document-wide)
+# so a distant, unrelated meta-reference elsewhere in a long task can never
+# retroactively launder a real, nearby imperative instruction.
+#
+# This exemption applies uniformly to every GATED_KEYWORDS pattern (same
+# general-purpose design as the negation-aware filter, never a credential-
+# specific carve-out) -- but GATED_PATH_MARKERS, GATED_TOOLS, GATED_ADAPTERS,
+# and the sandbox path-jail check are completely untouched by this; only
+# this one content-keyword scan gains a second, independent reason (quoted-
+# example, alongside negation) an occurrence can fail to escalate.
+_META_REFERENCE_CUES = re.compile(
+    r"\b(e\.g\.|for example|example|match(?:es|ing)?(?:\s+(?:one\s+of|against))?|"
+    r"contains?|keyword(?:s)?|test[- ]?case(?:s)?|spec(?:ification)?|"
+    r"PROTECTED_GATE_KEYWORDS|id/note/action_type|reference(?:s|d)?|named?)\b",
+    re.IGNORECASE,
+)
+_QUOTE_CHARS = ('"', "'")
+_META_REFERENCE_WINDOW_CHARS = 160
+
+
+def _is_quoted_meta_reference(task_description: str, match: "re.Match[str]") -> bool:
+    start, end = match.start(), match.end()
+    prev_char = task_description[start - 1] if start > 0 else ""
+    next_char = task_description[end] if end < len(task_description) else ""
+    if prev_char not in _QUOTE_CHARS or next_char not in _QUOTE_CHARS:
+        return False  # not directly quoted -- condition 1 fails, never exempt
+    before = task_description[max(0, start - _META_REFERENCE_WINDOW_CHARS):start]
+    after = task_description[end:end + _META_REFERENCE_WINDOW_CHARS]
+    return bool(_META_REFERENCE_CUES.search(before) or _META_REFERENCE_CUES.search(after))
+
 # RANK9_HEADLESS_BASH_NARROW_GRANT (Founder-authorized 2026-09-09, per the
 # read-only Rank 9 headless-gap decision packet reviewed and approved this
 # campaign): classify() previously treated ANY request for the "Bash" tool
@@ -250,17 +307,24 @@ def _clause_span(text: str, pos: int) -> tuple[int, int]:
 def _keyword_pattern_escalates(pattern: "re.Pattern[str]", task_description: str) -> bool:
     """True if `pattern` has at least one occurrence in `task_description`
     that is NOT sitting inside an explicit negative constraint in its own
-    clause -- i.e. real (or ambiguous) positive intent survives; an
-    occurrence with a clear negation cue immediately before it ('no X', 'do
-    not X') or immediately after it in the same clause ('X ... untouched')
-    is skipped instead of escalating."""
+    clause, AND is not a directly-quoted example/keyword-reference (see
+    QUOTED_EXAMPLE_META_REFERENCE_FILTER above) -- i.e. real (or ambiguous)
+    positive intent survives. An occurrence with a clear negation cue
+    immediately before it ('no X', 'do not X') or immediately after it in
+    the same clause ('X ... untouched'), OR one that is directly quoted
+    with an explicit example/spec/matching-rule cue nearby, is skipped
+    instead of escalating. Either exemption alone is sufficient to skip a
+    given occurrence; a single occurrence with NEITHER still escalates the
+    whole pattern exactly as before both repairs existed."""
     for m in pattern.finditer(task_description):
         c_start, c_end = _clause_span(task_description, m.start())
         clause = task_description[c_start:c_end]
         rel_start, rel_end = m.start() - c_start, m.end() - c_start
         before, after = clause[:rel_start], clause[rel_end:]
-        if not (_NEGATION_LEAD_CUES.search(before) or _NEGATION_TRAIL_CUES.search(after)):
-            return True  # a non-negated occurrence exists -- this pattern still escalates
+        negated = bool(_NEGATION_LEAD_CUES.search(before) or _NEGATION_TRAIL_CUES.search(after))
+        if negated or _is_quoted_meta_reference(task_description, m):
+            continue
+        return True  # a non-negated, non-quoted-example occurrence exists -- this pattern still escalates
     return False
 
 
