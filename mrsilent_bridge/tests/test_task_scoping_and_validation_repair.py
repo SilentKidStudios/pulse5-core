@@ -388,6 +388,126 @@ def test_20_post_repair_task_targets_existing_source_and_symbol() -> None:
         _cleanup(p.proposal_id, "test 20 cleanup")
 
 
+# ---- PART F: APPROVED-SCOPE FIDELITY REPAIR (2026-09-09) ---------------
+#
+# Real, live incident: 7 Founder-approved founder_gated proposals (ranks
+# 3/4/5/7/8/9/10, 2026-09-08/09) were dispatched using ONLY their original
+# generic observed_weakness/proposed_upgrade placeholder text --
+# implementation_scope/non_file_scope/validation_plan were silently
+# ignored by _build_task_text(), producing 5 real, meaningless engine
+# attempts that deterministically failed validation and were auto-
+# REJECTED, while the approved scope was never once attempted.
+
+def test_21_approved_implementation_scope_is_included_verbatim() -> None:
+    p = _p(observed_weakness="Founder Top-10 rank X has no actionable proposal",
+           proposed_upgrade="Founder/human review required -- this proposal deliberately does not scope itself")
+    p = proposal_mod.refine(p.proposal_id,
+                             implementation_scope="Wire provider_b_bridge.py to record job outcomes to job_ledger.")
+    try:
+        txt = advance._build_task_text(p)
+        check("task text contains the exact approved implementation_scope text",
+              "Wire provider_b_bridge.py to record job outcomes to job_ledger." in txt, txt[:300])
+        check("task text marks the approved scope as authoritative",
+              "APPROVED IMPLEMENTATION SCOPE" in txt and "authoritative" in txt, txt[:300])
+    finally:
+        _cleanup(p.proposal_id, "test 21 cleanup")
+
+
+def test_22_non_file_scope_is_preserved_in_task_text() -> None:
+    p = _p(observed_weakness="x", proposed_upgrade="y")
+    p = proposal_mod.refine(p.proposal_id,
+                             implementation_scope="Do the bounded thing.",
+                             non_file_scope="organ_discovery.py (DUTY_CHECKED_ENGINES), no other files")
+    try:
+        txt = advance._build_task_text(p)
+        check("task text preserves the declared non_file_scope",
+              "organ_discovery.py (DUTY_CHECKED_ENGINES), no other files" in txt, txt[:300])
+    finally:
+        _cleanup(p.proposal_id, "test 22 cleanup")
+
+
+def test_23_validation_plan_is_included_in_task_text() -> None:
+    p = _p(observed_weakness="x", proposed_upgrade="y")
+    p = proposal_mod.refine(p.proposal_id,
+                             implementation_scope="Do the bounded thing.",
+                             validation_plan="A real job_ledger record with selected_engine='provider_b' exists.")
+    try:
+        txt = advance._build_task_text(p)
+        check("task text includes the declared validation_plan",
+              "A real job_ledger record with selected_engine='provider_b' exists." in txt, txt[:300])
+    finally:
+        _cleanup(p.proposal_id, "test 23 cleanup")
+
+
+def test_24_generic_proposed_upgrade_cannot_broaden_approved_scope() -> None:
+    """A deliberately broader/contradictory proposed_upgrade must remain
+    background context, never the operative instruction, once
+    implementation_scope is declared."""
+    p = _p(observed_weakness="the whole subsystem is bad",
+           proposed_upgrade="rewrite the entire module and everything that touches it")
+    p = proposal_mod.refine(p.proposal_id,
+                             implementation_scope="Add exactly one optional field with a safe default.")
+    try:
+        txt = advance._build_task_text(p)
+        approved_idx = txt.index("APPROVED IMPLEMENTATION SCOPE")
+        background_idx = txt.index("Background context only")
+        broad_idx = txt.index("rewrite the entire module and everything that touches it")
+        check("approved scope block appears before the generic background text",
+              approved_idx < background_idx < broad_idx, txt[:400])
+        check("task text tells the engine to implement EXACTLY AND ONLY the approved scope",
+              "EXACTLY AND ONLY" in txt, txt[:400])
+        check("task text explicitly forbids scope expansion without a new Founder decision",
+              "requires a new, separate Founder decision" in txt, txt[:400])
+    finally:
+        _cleanup(p.proposal_id, "test 24 cleanup")
+
+
+def test_25_repair_intent_also_gets_approved_scope_block() -> None:
+    """Approved-scope fidelity applies to the REPAIR branch too, not just
+    the new-component branch."""
+    p = _p(observed_weakness="module.py::helper() has a bug", proposed_upgrade="fix the off-by-one error",
+           source_paths=["some/module.py"])
+    p = proposal_mod.refine(p.proposal_id, implementation_scope="Only fix the off-by-one in helper(); nothing else.")
+    try:
+        txt = advance._build_task_text(p)
+        check("REPAIR branch still fires for a source_paths+repair-verb proposal",
+              "REPAIRING existing canonical source" in txt, txt[:300])
+        check("REPAIR branch also includes the approved implementation_scope",
+              "Only fix the off-by-one in helper(); nothing else." in txt, txt[:300])
+    finally:
+        _cleanup(p.proposal_id, "test 25 cleanup")
+
+
+def test_26_protected_actions_still_named_forbidden_in_task_text() -> None:
+    p = _p(observed_weakness="x", proposed_upgrade="y")
+    p = proposal_mod.refine(p.proposal_id, implementation_scope="Do the bounded thing.")
+    try:
+        txt = advance._build_task_text(p)
+        for phrase in ("no paid resources", "no credential/secret changes", "no production promotion",
+                       "no destructive operations", "no model changes", "no isolation changes"):
+            check(f"task text still names protected-action prohibition: {phrase!r}", phrase in txt, txt[:400])
+    finally:
+        _cleanup(p.proposal_id, "test 26 cleanup")
+
+
+def test_27_no_implementation_scope_is_byte_for_byte_backward_compatible() -> None:
+    """A proposal that never went through refine() (the overwhelming
+    majority, including every existing low-risk proposal) must get
+    EXACTLY the same task text as before this repair -- no approved-scope
+    block, no background-context relabeling."""
+    p = _p(observed_weakness="no reference implementation exists yet", proposed_upgrade="build one")
+    try:
+        txt = advance._build_task_text(p)
+        check("no implementation_scope -> no APPROVED IMPLEMENTATION SCOPE block appears",
+              "APPROVED IMPLEMENTATION SCOPE" not in txt, txt[:300])
+        check("no implementation_scope -> no relabeling of observed_weakness/proposed_upgrade as background",
+              "Background context only" not in txt, txt[:300])
+        check("legacy unconditional BUILD template wording is unchanged",
+              "Create one small, correct, self-contained file" in txt, txt[:300])
+    finally:
+        _cleanup(p.proposal_id, "test 27 cleanup")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

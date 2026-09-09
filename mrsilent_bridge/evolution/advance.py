@@ -309,6 +309,44 @@ def _classify_task_intent(p: proposal_mod.Proposal) -> str:
     return _INTENT_AMBIGUOUS  # names a target but gives no signal at all about what to do with it -- never guess
 
 
+def _build_approved_scope_block(p: proposal_mod.Proposal) -> str:
+    """APPROVED-SCOPE FIDELITY REPAIR (2026-09-09): the authoritative task
+    text for a proposal that has been refined with a real implementation_
+    scope (evolution/proposal.py::refine() -- the exact mechanism the
+    Founder-decision completeness gate is built around). Real, live
+    incident this closes: 7 Founder-approved founder_gated proposals
+    (ranks 3/4/5/7/8/9/10, 2026-09-08/09) were dispatched using ONLY their
+    original, generic observed_weakness/proposed_upgrade placeholder text
+    -- implementation_scope/non_file_scope/validation_plan/canary_plan
+    were silently ignored -- producing 5 real, meaningless engine attempts
+    that deterministically failed validation and were auto-REJECTED,
+    while the actually-approved scope was never once attempted. Called
+    ONLY when p.implementation_scope is truthy, so a proposal that never
+    went through refine() (the overwhelming majority, including every
+    existing low-risk proposal) gets byte-for-byte the same task text as
+    before this repair -- this block is purely additive."""
+    parts = [
+        "APPROVED IMPLEMENTATION SCOPE (Founder-approved; authoritative -- "
+        "this is the actual instruction, not the background context below):",
+        p.implementation_scope,
+    ]
+    if p.non_file_scope:
+        parts.append(f"Non-file scope: {p.non_file_scope}")
+    if p.source_paths:
+        parts.append(f"Allowed target file(s)/symbol(s): {', '.join(p.source_paths)}")
+    if p.validation_plan:
+        parts.append(f"Validation expectations (the deliverable must satisfy this): {p.validation_plan}")
+    if p.canary_plan:
+        parts.append(f"Independent re-validation (canary) expectations: {p.canary_plan}")
+    parts.append(
+        "Protected actions remain forbidden regardless of this scope: no paid resources, no "
+        "credential/secret changes, no production promotion, no destructive operations, no model "
+        "changes, no isolation changes, no remote-execution authority expansion. Do not expand "
+        "this scope for any reason -- any additional work requires a new, separate Founder decision."
+    )
+    return "\n\n".join(parts)
+
+
 def _build_task_text(p: proposal_mod.Proposal) -> str:
     # GOD_MODE_V1 FINAL GAP CLOSURE: a proposal with explicit source_paths
     # (GOVERNED, authority-checked, context-staging-filtered -- see
@@ -340,22 +378,48 @@ def _build_task_text(p: proposal_mod.Proposal) -> str:
             "matched) -- refusing to guess; refine the proposal's text to make intent explicit"
         )
 
+    approved_scope_block = _build_approved_scope_block(p) if p.implementation_scope else None
+    background_label = (
+        "Background context only (why this work exists -- the APPROVED IMPLEMENTATION SCOPE "
+        "above is the actual instruction; do not broaden the task beyond it based on this text):"
+        if approved_scope_block else None
+    )
+
     if intent == _INTENT_REPAIR:
         symbol_match = _TARGET_SYMBOL_RE.search(f"{p.observed_weakness or ''} {p.proposed_upgrade or ''}")
         target_symbol_line = f"Target symbol: {symbol_match.group(0)}\n" if symbol_match else ""
+        weakness_block = (
+            f"{approved_scope_block}\n\n{background_label}\n"
+            f"Observed weakness: {p.observed_weakness}\n"
+            f"Proposed upgrade: {p.proposed_upgrade}\n\n"
+            if approved_scope_block else
+            f"Observed weakness: {p.observed_weakness}\n"
+            f"Proposed upgrade: {p.proposed_upgrade}\n\n"
+        )
         return (
             f"You are REPAIRING existing canonical source code IN PLACE — this is NOT a request to "
             f"build a new standalone prototype, demo, or scaffold file. {sandbox_note}\n\n"
             f"Target file(s): {', '.join(p.source_paths)}\n"
             f"{target_symbol_line}"
-            f"Observed weakness: {p.observed_weakness}\n"
-            f"Proposed upgrade: {p.proposed_upgrade}\n\n"
+            f"{weakness_block}"
             "Modify the staged, canonical target file(s) named above DIRECTLY, in place, to correct "
             "the observed weakness. Do NOT create a new, separate, standalone file that merely "
             "demonstrates or prototypes the fix — edit the real target file(s) so the actual defect "
             "is corrected there. Preserve every other existing behavior of the target file(s) exactly "
             "as-is; this is a bounded, targeted repair, not a rewrite. No comments explaining what you "
             "did, just the working code."
+        )
+
+    if approved_scope_block:
+        return (
+            f"You are implementing a small, self-contained prototype for a proposed upgrade. {sandbox_note}\n\n"
+            f"{approved_scope_block}\n\n"
+            f"{background_label}\n"
+            f"Observed weakness: {p.observed_weakness}\n"
+            f"Proposed upgrade: {p.proposed_upgrade}\n\n"
+            "Implement EXACTLY AND ONLY the APPROVED IMPLEMENTATION SCOPE above as a small, correct, "
+            "self-contained deliverable that satisfies its stated validation expectations. Keep it "
+            "minimal. No comments explaining what you did, just the working code/content."
         )
 
     return (
