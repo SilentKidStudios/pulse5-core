@@ -2643,20 +2643,23 @@ def test_TEST_FAILURE_live_deterministic_fixture_real_validation_and_repair() ->
           record.phases)
     check("VALID_PROGRESS_PRESERVED: calc.py from the implement phase survived the repair cycle",
           (Path(r.workdir) / "calc.py").exists(), r.workdir)
-    # CANARY/INDEPENDENT-VALIDATION PERSISTENCE REPAIR (2026-09-09) note:
+    # CANARY/INDEPENDENT-VALIDATION PERSISTENCE REPAIR (2026-09-09) note,
+    # UPDATED by the RANK8_INDEPENDENT_TEST_DISCOVERY_REPAIR (same date):
     # this fixture's real, unmocked evolution.independent_validation.
-    # recheck() genuinely disagrees here -- its own test-discovery
-    # mechanism reports "NO TESTS RAN" against this real pytest-style
-    # test_calc.py, while validation.py's real pytest subprocess genuinely
-    # passed 1/1. That disagreement was ALREADY happening before the
-    # persistence repair (recheck() was already called on every promotion-
-    # eligible path); the repair only stopped SILENTLY MASKING it as a
-    # bare "succeeded" (the exact bug this file's other new tests target)
-    # -- status is now honestly "succeeded_validator_disagreement", not a
-    # false "succeeded". A real, separate gap this incidentally surfaces
-    # (independent_validation.py's own test-discovery not recognizing
-    # pytest-authored tests) is OUT OF SCOPE for the persistence repair
-    # and intentionally not fixed here.
+    # recheck() USED TO genuinely disagree here -- its test-discovery
+    # mechanism (`unittest discover`) reported "NO TESTS RAN" against this
+    # real pytest-style test_calc.py, while validation.py's real pytest
+    # subprocess genuinely passed 1/1. The persistence repair (this file's
+    # other new tests) only stopped SILENTLY MASKING that disagreement as
+    # a bare "succeeded"; it deliberately left the discovery mismatch
+    # itself out of scope. independent_validation.py::_recheck_tests() has
+    # since been repaired to mirror validation.py's own runner-selection
+    # precedence (prefer pytest when importable, matching what actually
+    # ran here), so this fixture's real recheck() now agrees with primary
+    # validation and r.status is expected to be plain "succeeded" --
+    # "succeeded_validator_disagreement" is still accepted below only as a
+    # defensive fallback (e.g. if pytest is genuinely unavailable in this
+    # environment), never as the expected outcome.
     check("FALSE_SUCCESS=NO / FINAL_OUTCOME_CORRECT=YES: the SECOND real pytest run genuinely passed "
           "(validation.py+canary), and the terminal status honestly reflects real evidence -- either full "
           "success, or a genuine independent-validator disagreement, never silently masked as a false 'succeeded'",
