@@ -27,6 +27,7 @@ for p in [STATE, LOGS, QUEUE, DONE, OUTBOX, SENT]:
 # approvals card list agree on the same id for the same record.
 sys.path.insert(0, str(ROOT / "mrsilent_bridge"))
 from evolution import founder_request  # noqa: E402
+from evolution import founder_view_filter  # noqa: E402
 import authority_policy  # noqa: E402
 ESCALATION_ID_PREFIX = "ea_"
 ESCALATION_DEEPLINK_SCHEME = "mrsilent://approval/"
@@ -152,6 +153,20 @@ def send_founder_escalations():
     results = []
     for req in founder_request.list_pending_founder_requests():
         if req.get("notification_sent"):
+            continue
+        # Real live leak found and fixed 2026-09-08: this loop pushed EVERY
+        # pending escalation straight to the real Founder Telegram channel,
+        # including explicitly synthetic/test-only ones (e.g. a campaign
+        # whose own objective text says "synthetic end-to-end test ...").
+        # founder_view_filter.py already implements this exact
+        # classification for the App's Approvals/Projects views (built
+        # 2026-08-20 after a real device finding of the same problem) but
+        # was never consulted here — reused, not reimplemented, so
+        # Telegram and the App agree on what counts as real Founder work.
+        # Not marked notification_sent: no message was actually sent, and
+        # that field's contract (see founder_request.py) is "a real SENT
+        # result", so a suppressed test item must not claim one.
+        if founder_view_filter.classify_pending_item(req) != founder_view_filter.CATEGORY_REAL_ACTIONABLE:
             continue
         escalation_id = req["escalation_id"]
         payload = req.get("payload", {})
