@@ -231,6 +231,7 @@ def submit_job(
     model: str | None = None,
     validation_config: dict[str, Any] | None = None,
     on_job_created: Callable[[str], None] | None = None,
+    bash_commands: list[str] | None = None,
 ) -> JobResult:
     # IDEMPOTENCY: an identical task already actively in-flight is suppressed
     # BEFORE any job_id/sandbox/ledger is created — see
@@ -267,13 +268,14 @@ def submit_job(
             "tools": sorted(requested_tools), "source_paths": source_paths or [],
             "validation_config": validation_config,
             "context_staging_excluded": _excluded_preview,
+            "bash_commands": bash_commands or [],
         },
     )
     return _execute(
         job_id, workdir, task, requested_by=requested_by, requested_tools=requested_tools,
         source_paths=[Path(p) for p in (source_paths or [])], timeout_s=timeout_s,
         founder_approved=founder_approved, model=model, validation_config=validation_config,
-        copy_source_paths=True,
+        copy_source_paths=True, bash_commands=bash_commands,
     )
 
 
@@ -319,6 +321,7 @@ def resume_job(job_id: str, *, requested_by: str = "recovery") -> JobResult:
             timeout_s=DEFAULT_TIMEOUT_S, founder_approved=False, model=record.model,
             validation_config=params.get("validation_config"),
             copy_source_paths=copy_source_paths, is_resume=True,
+            bash_commands=params.get("bash_commands") or None,
         )
     finally:
         job_ledger.release(job_id, owner=requested_by)
@@ -341,6 +344,7 @@ def _execute(
     job_id: str, workdir: Path, task: str, *, requested_by: str, requested_tools: set[str],
     source_paths: list[Path], timeout_s: int, founder_approved: bool, model: str | None,
     validation_config: dict[str, Any] | None, copy_source_paths: bool, is_resume: bool = False,
+    bash_commands: list[str] | None = None,
 ) -> JobResult:
     if not is_resume:
         job_ledger.claim(job_id, owner=requested_by)
@@ -353,6 +357,7 @@ def _execute(
             sandbox_root=workdir,
             source_paths=source_paths,
             founder_approved=founder_approved,
+            bash_commands=bash_commands,
         )
         job_ledger.checkpoint(job_id, JobState.AUTHORIZED, risk_class=decision.risk_class.value,
                                approval_state=decision.approval_state.value,

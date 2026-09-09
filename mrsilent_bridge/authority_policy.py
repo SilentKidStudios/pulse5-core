@@ -15,6 +15,7 @@ job code.
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -126,6 +127,114 @@ _NEGATION_TRAIL_CUES = re.compile(
 )
 _CLAUSE_BOUNDARY = re.compile(r"[.;\n]")
 
+# RANK9_HEADLESS_BASH_NARROW_GRANT (Founder-authorized 2026-09-09, per the
+# read-only Rank 9 headless-gap decision packet reviewed and approved this
+# campaign): classify() previously treated ANY request for the "Bash" tool
+# as unconditionally FOUNDER_GATED (see GATED_TOOLS above) -- with no way
+# for an ordinary, already-approved WorkItem to run e.g. `pytest` or `git
+# status` unattended. This closes that gap NARROWLY:
+#
+#   - the caller must pass `bash_commands` to classify() -- the LITERAL
+#     command string(s) the job needs, declared up front, never inferred
+#     or scraped from task_description free text;
+#   - every entry must pass _bash_command_is_safe() below, a WHITELIST-ONLY
+#     matcher: only inert/read-only/deterministic-test commands (git
+#     status/diff/log/show, pytest / python[3] -m pytest) with a small
+#     explicit flag whitelist qualify. Anything not explicitly recognized
+#     -- unknown base command, unknown flag, or the presence of ANY shell
+#     metacharacter/operator (;, &, |, `, $(, >, <, ...) that could chain a
+#     safe prefix with an unsafe suffix (e.g. "git status; rm -rf .") --
+#     fails closed;
+#   - even when verified, Bash is granted as scoped "Bash(<command>:*)"
+#     entries only, NEVER the bare string "Bash" -- so Claude Code's own
+#     tool-permission enforcement refuses any command outside the exact
+#     verified set, even if the agent tries something else mid-job;
+#   - GATED_KEYWORDS, GATED_PATH_MARKERS, GATED_ADAPTERS and the sandbox
+#     path-jail check below are completely UNCHANGED and still apply on
+#     top of this -- a verified-safe Bash command can still be
+#     FOUNDER_GATED by any of them (task text mentioning "scorpio",
+#     "credential", a protected source path, an out-of-jail sandbox, a
+#     GATED_ADAPTERS provider, etc.);
+#   - GATED_TOOLS itself is not modified -- Bash stays a member; this only
+#     ever adds a narrow, explicit exemption evaluated before it applies.
+#     A bare/global "Bash" grant remains reachable ONLY the pre-existing
+#     way this module already supported: an explicit human passing
+#     founder_approved=True for an otherwise-gated job.
+BASH_UNSAFE_SUBSTRINGS = (";", "&", "|", "`", "$(", ">", "<", "\n", "\r")
+
+# Per-base-command whitelist: exact positional base tokens -> the ONLY
+# flags/arg shapes tolerated after them. Deliberately does not attempt to
+# enumerate dangerous flags (git diff's --ext-diff, git -c core.pager=...,
+# pytest -p <plugin>) -- whitelisting only the flags actually needed for
+# inert inspection/test-execution use means anything else, dangerous or
+# not, is simply never on the list and is rejected for that reason alone.
+_SAFE_BASH_SPECS: dict[tuple[str, ...], dict[str, object]] = {
+    ("git", "status"): {"flags": frozenset({"--short", "-s", "--porcelain"})},
+    ("git", "diff"): {"flags": frozenset({"--stat", "--cached", "--staged", "--name-only", "--name-status"}),
+                       "allow_positional": True},
+    ("git", "log"): {"flags": frozenset({"--oneline", "--stat", "--name-only"}),
+                      "allow_positional": True, "allow_dash_n": True},
+    ("git", "show"): {"flags": frozenset({"--stat", "--name-only"}), "allow_positional": True},
+    ("pytest",): {"flags": frozenset({"-q", "-v", "-vv", "-x", "--tb=short", "--tb=long", "--tb=line",
+                                       "--tb=no", "--no-header"}),
+                  "allow_positional": True, "allow_k": True},
+    ("python3", "-m", "pytest"): {"flags": frozenset({"-q", "-v", "-vv", "-x", "--tb=short", "--tb=long",
+                                                        "--tb=line", "--tb=no", "--no-header"}),
+                                   "allow_positional": True, "allow_k": True},
+    ("python", "-m", "pytest"): {"flags": frozenset({"-q", "-v", "-vv", "-x", "--tb=short", "--tb=long",
+                                                       "--tb=line", "--tb=no", "--no-header"}),
+                                  "allow_positional": True, "allow_k": True},
+}
+
+_POSITIONAL_TOKEN = re.compile(r"^[A-Za-z0-9_./:-]+$")
+_DASH_N_TOKEN = re.compile(r"^-\d+$")
+
+
+def _bash_command_is_safe(cmd: str) -> tuple[bool, str]:
+    """Whitelist-only literal-command classifier for RANK9_HEADLESS_BASH_
+    NARROW_GRANT -- see the block comment above this function for the full
+    design rationale. Returns (is_safe, reason)."""
+    cmd = (cmd or "").strip()
+    if not cmd:
+        return False, "empty command"
+    for marker in BASH_UNSAFE_SUBSTRINGS:
+        if marker in cmd:
+            return False, f"contains disallowed shell metacharacter/operator {marker!r}"
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError as e:
+        return False, f"unparseable command: {e}"
+    if not tokens:
+        return False, "empty command"
+
+    for base, spec in _SAFE_BASH_SPECS.items():
+        n = len(base)
+        if tuple(tokens[:n]) != base:
+            continue
+        flags = spec.get("flags", frozenset())
+        allow_positional = spec.get("allow_positional", False)
+        allow_k = spec.get("allow_k", False)
+        allow_dash_n = spec.get("allow_dash_n", False)
+        i = n
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok in flags:
+                i += 1
+                continue
+            if allow_k and tok == "-k" and i + 1 < len(tokens):
+                i += 2  # the filter expression itself was already metachar-scanned above
+                continue
+            if allow_dash_n and _DASH_N_TOKEN.match(tok):
+                i += 1
+                continue
+            if allow_positional and not tok.startswith("-") and _POSITIONAL_TOKEN.match(tok):
+                i += 1
+                continue
+            return False, f"unrecognized argument {tok!r} for {' '.join(base)!r} (whitelist-only)"
+        return True, "matches Rank-9 safe-command whitelist"
+
+    return False, f"base command {tokens[:3]!r} is not in the Rank-9 safe-command whitelist"
+
 
 def _clause_span(text: str, pos: int) -> tuple[int, int]:
     """The [start, end) span of the clause (bounded by . ; newline, or the
@@ -174,6 +283,7 @@ def classify(
     source_paths: list[Path] | None = None,
     founder_approved: bool = False,
     adapter: str | None = None,
+    bash_commands: list[str] | None = None,
 ) -> PolicyDecision:
     """Classify a job request and decide whether it may run unattended.
 
@@ -184,6 +294,15 @@ def classify(
     protected area is itself the thing being gated. `adapter` names which engine
     would run the job (e.g. "claude_code", "codex") — adapters in GATED_ADAPTERS
     are unconditionally founder-gated regardless of task content or tools.
+
+    `bash_commands` (RANK9_HEADLESS_BASH_NARROW_GRANT, see the block comment
+    above _bash_command_is_safe()): the caller's own declared literal Bash
+    command(s), never inferred from task_description. When "Bash" is
+    requested and every entry here passes _bash_command_is_safe(), Bash is
+    exempted from the unconditional GATED_TOOLS escalation below and
+    granted as scoped "Bash(<command>:*)" entries only. Omitting this (or
+    any unverified entry) leaves Bash exactly as gated as before this
+    parameter existed.
     """
     reasons: list[str] = []
     risk = RiskClass.LOW
@@ -192,8 +311,27 @@ def classify(
         risk = RiskClass.FOUNDER_GATED
         reasons.append(f"adapter '{adapter}' is always founder-gated (paid external service / no per-tool sandbox)")
 
-    unknown_tools = set(requested_tools) - DEFAULT_LOW_RISK_TOOLS
-    gated_requested = requested_tools & GATED_TOOLS
+    verified_safe_bash_commands: list[str] = []
+    if "Bash" in requested_tools and bash_commands:
+        all_safe = True
+        for c in bash_commands:
+            ok, why = _bash_command_is_safe(c)
+            if not ok:
+                all_safe = False
+                reasons.append(f"declared bash command not verified safe, Bash stays gated: {c!r} ({why})")
+                break
+            verified_safe_bash_commands.append(c.strip())
+        if not all_safe:
+            verified_safe_bash_commands = []
+    bash_exempted = bool(verified_safe_bash_commands)
+    if bash_exempted:
+        reasons.append(f"Bash narrowly granted for verified-safe command(s) only: {verified_safe_bash_commands}")
+
+    effective_gated_tools = GATED_TOOLS - ({"Bash"} if bash_exempted else set())
+    effective_low_risk_tools = DEFAULT_LOW_RISK_TOOLS | ({"Bash"} if bash_exempted else set())
+
+    unknown_tools = set(requested_tools) - effective_low_risk_tools
+    gated_requested = requested_tools & effective_gated_tools
     if gated_requested:
         risk = RiskClass.FOUNDER_GATED
         reasons.append(f"requested gated tool(s): {sorted(gated_requested)}")
@@ -271,6 +409,15 @@ def classify(
     else:
         approval = ApprovalState.NOT_REQUIRED
 
-    granted = frozenset(requested_tools) if risk != RiskClass.FOUNDER_GATED or founder_approved else frozenset()
+    may_execute = risk != RiskClass.FOUNDER_GATED or founder_approved
+    granted_set = set(requested_tools)
+    if bash_exempted and may_execute:
+        # Never the bare string "Bash" -- only the exact verified commands,
+        # scoped the same way Claude Code's own --allowedTools syntax scopes
+        # any other tool (e.g. "Bash(git status:*)"), so the CLI's own
+        # permission enforcement refuses anything outside this exact set.
+        granted_set.discard("Bash")
+        granted_set |= {f"Bash({c}:*)" for c in verified_safe_bash_commands}
+    granted = frozenset(granted_set) if may_execute else frozenset()
 
     return PolicyDecision(risk_class=risk, approval_state=approval, reasons=reasons, granted_tools=granted)
