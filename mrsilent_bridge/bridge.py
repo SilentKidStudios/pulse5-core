@@ -464,12 +464,24 @@ def _execute(
             exit_code = proc.returncode
             stdout_path.write_text(proc.stdout)
             stderr_path.write_text(proc.stderr)
+            # RESULT_PARSE_FIDELITY REPAIR (2026-09-09): claude_result used to
+            # be parsed ONLY when exit_code==0, so a real, well-formed JSON
+            # result the CLI itself marks is_error=true (e.g. stop_reason=
+            # "refusal", a Bash-tool permission denial under a headless -p
+            # invocation) was silently discarded -- claude_result stayed
+            # None even though the actual reason was sitting, fully parsed,
+            # right there in stdout. Parsing now happens unconditionally
+            # whenever stdout is valid JSON; `status` classification below is
+            # completely unchanged (still driven by exit_code exactly as
+            # before) -- this never converts a real failure into success, it
+            # only stops throwing away a real diagnostic that was already on
+            # disk in stdout.txt anyway.
+            try:
+                claude_result = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                claude_result = None
             if exit_code == 0:
                 status = JobStatus.SUCCEEDED
-                try:
-                    claude_result = json.loads(proc.stdout)
-                except json.JSONDecodeError:
-                    claude_result = None
             elif _classify_claude_unavailable(exit_code, proc.stderr, proc.stdout):
                 status = JobStatus.CLAUDE_UNAVAILABLE
                 error = "Claude CLI reported quota/rate-limit/auth unavailability — see stderr.txt"
@@ -519,6 +531,20 @@ def _execute(
 
         final_disposition = status.value
 
+        # FILES_TOUCHED PERSISTENCE REPAIR (2026-09-09): real, live incident --
+        # jobs d35ef27b and 11b56dab (Founder Top-10 ranks 8/9, delegated to
+        # render-forge-01) genuinely produced real file changes (confirmed
+        # directly against both the physical sandbox and this function's own
+        # in-memory files_changed), but only the PROMOTION_CANDIDATE branch
+        # below ever passed files_touched=files_changed to job_ledger.
+        # checkpoint() -- every other terminal branch silently persisted an
+        # empty files_touched, making a real, correctly-scoped deliverable
+        # indistinguishable in the durable ledger from a job that touched
+        # nothing at all. This is what made an ordinary validation-contract
+        # mismatch (see the require_tests investigation) look like a
+        # render-forge-01 infrastructure failure. Every branch below now
+        # persists the same real files_changed computed above; nothing about
+        # `status`/promotion_eligible/error_class classification changes.
         if status == JobStatus.SUCCEEDED and promotion_eligible:
             job_ledger.checkpoint(job_id, JobState.PROMOTION_CANDIDATE, validation_result=validation_result,
                                    independent_validation_result=independent_validation_result,
@@ -527,15 +553,18 @@ def _execute(
         elif status == JobStatus.SUCCEEDED and validation_result and not validation_result.get("passed"):
             final_disposition = "succeeded_validation_failed"
             job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result="succeeded_validation_failed",
-                                   error_class="validation", validation_result=validation_result)
+                                   error_class="validation", validation_result=validation_result,
+                                   files_touched=files_changed)
         elif status == JobStatus.SUCCEEDED:
             # validation.py itself passed, but the independent recheck disagreed.
             final_disposition = "succeeded_validator_disagreement"
             job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result="succeeded_validator_disagreement",
                                    error_class="validator_disagreement", validation_result=validation_result,
-                                   independent_validation_result=independent_validation_result)
+                                   independent_validation_result=independent_validation_result,
+                                   files_touched=files_changed)
         else:
-            job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result=status.value, error_class="infra")
+            job_ledger.checkpoint(job_id, JobState.FAILED, terminal_result=status.value, error_class="infra",
+                                   files_touched=files_changed)
 
         result = JobResult(
             job_id=job_id, task=task,
