@@ -263,12 +263,12 @@ def test_16_arbitrary_test_skipping_not_possible_via_config_content() -> None:
     try:
         cfg_no_plan = advance._validation_config_for_proposal(p)
         check("a proposal with no validation_plan gets require_tests=False (unchanged legacy default)",
-              cfg_no_plan == {"require_tests": False}, cfg_no_plan)
+              cfg_no_plan == {"require_tests": False, "documentation_only_scope": False}, cfg_no_plan)
 
         p2 = proposal_mod.refine(p.proposal_id, validation_plan="unit tests must prove X")
         cfg_with_plan = advance._validation_config_for_proposal(p2)
         check("a proposal that explicitly declared a validation_plan gets require_tests=True",
-              cfg_with_plan == {"require_tests": True}, cfg_with_plan)
+              cfg_with_plan == {"require_tests": True, "documentation_only_scope": False}, cfg_with_plan)
     finally:
         _cleanup(p.proposal_id, "test 16 cleanup")
 
@@ -506,6 +506,228 @@ def test_27_no_implementation_scope_is_byte_for_byte_backward_compatible() -> No
               "Create one small, correct, self-contained file" in txt, txt[:300])
     finally:
         _cleanup(p.proposal_id, "test 27 cleanup")
+
+
+# ---- DOCUMENTATION_VALIDATION_SEMANTICS (Founder-authorized 2026-09-09) ----
+#
+# Real, live incident: jobs d35ef27b (rank 8, ASSESSMENT.md) and 3597f88b
+# (rank 10, pulseworld_survey_report.md) genuinely produced correct,
+# real, non-empty documentation deliverables, but were rejected purely
+# because check_tests() demanded a test_*.py/*_test.py file that makes no
+# sense for a non-executable deliverable. documentation_only_scope is a
+# CLAIM on the proposal (never independently sufficient); validation.py's
+# _documentation_only_evidence() only ever honors it once the job's REAL
+# changed sandbox files are evidence-confirmed to be pure documentation.
+
+def test_28_pure_markdown_doc_change_does_not_require_test_file() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        sandbox = Path(td)
+        (sandbox / "ASSESSMENT.md").write_text("# Real assessment content\n\nReal findings here.\n")
+        result = validation.validate(
+            sandbox, {"added": ["ASSESSMENT.md"], "modified": [], "removed": []},
+            config={"require_tests": True, "documentation_only_scope": True},
+        )
+        check("pure Markdown documentation change passes without a behavioral test file",
+              result.passed, result.to_json()["checks"])
+        names = [c["name"] for c in result.to_json()["checks"]]
+        check("the deterministic documentation_only_validation check actually ran",
+              "documentation_only_validation" in names, names)
+        check("test_discovery_and_run never ran for confirmed doc-only scope",
+              "test_discovery_and_run" not in names, names)
+
+
+def test_29_pure_text_report_artifact_requires_declared_validation_plan_evidence() -> None:
+    """The 'approved validation_plan still required' bar is enforced
+    upstream by proposal_completeness()/is_decision_ready() (a founder_
+    gated proposal with documentation_only_scope=True but no
+    validation_plan is never decision-ready in the first place); at the
+    validate() layer, this proves the doc-only evidence check itself
+    still applies deterministic, real evidence (non-empty, real file)."""
+    with tempfile.TemporaryDirectory() as td:
+        sandbox = Path(td)
+        (sandbox / "census_report.txt").write_text("Real census counts: 2209 discovered, 211 evaluated.\n")
+        result = validation.validate(
+            sandbox, {"added": ["census_report.txt"], "modified": [], "removed": []},
+            config={"require_tests": True, "documentation_only_scope": True},
+        )
+        check("pure text report artifact passes without a behavioral test file", result.passed, result.to_json()["checks"])
+
+    p = proposal_mod.create(observed_weakness="x", proposed_upgrade="y", risk_score="founder_gated", origin="test")
+    try:
+        p = proposal_mod.refine(p.proposal_id, documentation_only_scope=True)
+        check("a founder_gated proposal declaring documentation_only_scope=True but NO validation_plan "
+              "(and none of the other completeness-gate fields) is still NOT decision-ready -- documentation_only_scope "
+              "is additive, never a substitute for the existing completeness gate",
+              not proposal_mod.is_decision_ready(p), proposal_mod.proposal_completeness(p))
+    finally:
+        _cleanup(p.proposal_id, "test 29 cleanup")
+
+
+def test_30_python_plus_readme_still_requires_tests() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        sandbox = Path(td)
+        (sandbox / "helper.py").write_text("def add(a, b):\n    return a + b\n")
+        (sandbox / "README.md").write_text("# helper\n\nAdds two numbers.\n")
+        result = validation.validate(
+            sandbox, {"added": ["helper.py", "README.md"], "modified": [], "removed": []},
+            config={"require_tests": True, "documentation_only_scope": True},
+        )
+        check("REGRESSION: Python + README mix is NEVER treated as documentation-only", not result.passed, result.to_json()["checks"])
+        test_check = next((c for c in result.to_json()["checks"] if c["name"] == "test_discovery_and_run"), None)
+        check("require_tests=True still fires for the real, non-doc-only mixed change",
+              test_check is not None and test_check["passed"] is False, test_check)
+
+
+def test_31_bash_script_change_still_requires_tests() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        sandbox = Path(td)
+        (sandbox / "deploy.sh").write_text("#!/bin/bash\necho hi\n")
+        result = validation.validate(
+            sandbox, {"added": ["deploy.sh"], "modified": [], "removed": []},
+            config={"require_tests": True, "documentation_only_scope": True},
+        )
+        check("REGRESSION: a .sh change is never treated as documentation-only even when declared", not result.passed, result.to_json()["checks"])
+
+
+def test_32_runtime_config_change_still_requires_tests() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        sandbox = Path(td)
+        (sandbox / "service.yaml").write_text("restart: always\n")
+        result = validation.validate(
+            sandbox, {"added": ["service.yaml"], "modified": [], "removed": []},
+            config={"require_tests": True, "documentation_only_scope": True},
+        )
+        check("REGRESSION: a runtime config (.yaml) change is never treated as documentation-only even when declared",
+              not result.passed, result.to_json()["checks"])
+
+
+def test_33_self_label_bypass_prevented_when_targeting_executable_source() -> None:
+    """DOC_ONLY_SELF_LABEL_BYPASS_PREVENTED: a proposal that merely SAYS
+    'documentation' in free text but whose real changes are executable
+    source must never bypass tests -- classification is evidence-based,
+    never text-based."""
+    with tempfile.TemporaryDirectory() as td:
+        sandbox = Path(td)
+        (sandbox / "evil.py").write_text("import os\nos.system('echo pwned')\n")
+        result = validation.validate(
+            sandbox, {"added": ["evil.py"], "modified": [], "removed": []},
+            config={"require_tests": True, "documentation_only_scope": True},
+        )
+        check("a declared documentation_only_scope=True is IGNORED once real evidence shows a .py file",
+              not result.passed, result.to_json()["checks"])
+        names = [c["name"] for c in result.to_json()["checks"]]
+        check("documentation_only_validation never even reports a pass for this real .py change",
+              not any(c["name"] == "documentation_only_validation" and c["passed"] for c in result.to_json()["checks"]), names)
+
+
+def test_34_documentation_only_proposal_with_no_real_changes_cannot_silently_pass() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        sandbox = Path(td)
+        result = validation.validate(
+            sandbox, {"added": [], "modified": [], "removed": []},
+            config={"require_tests": True, "documentation_only_scope": True},
+        )
+        check("REGRESSION: zero real changes + documentation_only_scope=True + require_tests=True still fails "
+              "(falls through to the normal missing-test-file failure, never a silent pass)",
+              not result.passed, result.to_json()["checks"])
+
+
+def test_35_missing_required_documentation_artifact_fails() -> None:
+    """An empty 'deliverable' must never satisfy documentation-only scope."""
+    with tempfile.TemporaryDirectory() as td:
+        sandbox = Path(td)
+        (sandbox / "ASSESSMENT.md").write_text("")
+        result = validation.validate(
+            sandbox, {"added": ["ASSESSMENT.md"], "modified": [], "removed": []},
+            config={"require_tests": True, "documentation_only_scope": True},
+        )
+        check("an empty documentation artifact fails, never silently passes", not result.passed, result.to_json()["checks"])
+        doc_check = next((c for c in result.to_json()["checks"] if c["name"] == "documentation_only_validation"), None)
+        check("the failure is attributed to the documentation_only_validation check, naming the empty file",
+              doc_check is not None and doc_check["passed"] is False and "empty" in doc_check["detail"], doc_check)
+
+
+def test_36_unrelated_file_mutation_still_enforced_by_existing_scope_checks() -> None:
+    """changed_file_inspection's existing protected-marker/sandbox-escape
+    enforcement is completely untouched by this repair."""
+    with tempfile.TemporaryDirectory() as td:
+        sandbox = Path(td)
+        (sandbox / "ASSESSMENT.md").write_text("real content")
+        result = validation.validate(
+            sandbox, {"added": ["ASSESSMENT.md"], "modified": [], "removed": []},
+            config={"require_tests": True, "documentation_only_scope": True},
+        )
+        check("existing changed_file_inspection check still runs and passes for an in-sandbox doc file",
+              any(c["name"] == "changed_file_inspection" and c["passed"] for c in result.to_json()["checks"]),
+              result.to_json()["checks"])
+
+
+def test_37_existing_behavioral_validation_semantics_unchanged_for_non_doc_proposals() -> None:
+    """A proposal that never sets documentation_only_scope at all (the
+    overwhelming majority, including every historical proposal) must get
+    byte-for-byte the same require_tests behavior as before this repair."""
+    with tempfile.TemporaryDirectory() as td:
+        sandbox = Path(td)
+        result_no_tests_required = validation.validate(
+            sandbox, {"added": [], "modified": [], "removed": []}, config={"require_tests": False},
+        )
+        check("require_tests=False with no documentation_only_scope key at all: unchanged legacy vacuous pass",
+              result_no_tests_required.passed, result_no_tests_required.to_json())
+
+        result_tests_required = validation.validate(
+            sandbox, {"added": [], "modified": [], "removed": []}, config={"require_tests": True},
+        )
+        check("require_tests=True with no documentation_only_scope key at all: unchanged legacy failure on no test file",
+              not result_tests_required.passed, result_tests_required.to_json())
+
+
+def test_38_real_rank8_and_rank10_historical_sandboxes_now_validate_correctly() -> None:
+    """Direct regression proof against the two REAL historical sandboxes
+    this policy was authorized to fix -- not synthetic fixtures."""
+    rank8_sandbox = Path("jobs/d35ef27b-a26c-4eac-9f4b-a0813d72de03/workdir")
+    rank10_sandbox = Path("jobs/3597f88b-772a-4a8d-8edd-01f09cdc1b61/workdir")
+    if rank8_sandbox.exists():
+        result8 = validation.validate(
+            rank8_sandbox, {"added": ["ASSESSMENT.md"], "modified": [], "removed": []},
+            config={"require_tests": True, "documentation_only_scope": True},
+        )
+        check("REAL rank 8 historical sandbox (ASSESSMENT.md) now validates correctly", result8.passed, result8.to_json()["checks"])
+    if rank10_sandbox.exists():
+        result10 = validation.validate(
+            rank10_sandbox, {"added": ["pulseworld_survey_report.md"], "modified": [], "removed": []},
+            config={"require_tests": True, "documentation_only_scope": True},
+        )
+        check("REAL rank 10 historical sandbox (pulseworld_survey_report.md) now validates correctly",
+              result10.passed, result10.to_json()["checks"])
+
+
+def test_39_proposal_field_roundtrips_and_defaults_to_none() -> None:
+    p = _p(observed_weakness="x", proposed_upgrade="y")
+    try:
+        check("documentation_only_scope defaults to None (unanswered, never assumed False-as-code, never True)",
+              p.documentation_only_scope is None, p.documentation_only_scope)
+        p2 = proposal_mod.refine(p.proposal_id, documentation_only_scope=True)
+        check("refine() can explicitly set documentation_only_scope=True", p2.documentation_only_scope is True, p2.documentation_only_scope)
+        reloaded = proposal_mod.load(p.proposal_id)
+        check("the declaration persists across a fresh disk load", reloaded.documentation_only_scope is True, reloaded.documentation_only_scope)
+    finally:
+        _cleanup(p.proposal_id, "test 39 cleanup")
+
+
+def test_40_ambiguous_scope_with_no_documentation_only_declaration_fails_closed() -> None:
+    """A proposal that never declares documentation_only_scope at all
+    (the ambiguous/default case) must fail closed -- normal require_tests
+    behavior applies, exactly as before this repair existed."""
+    with tempfile.TemporaryDirectory() as td:
+        sandbox = Path(td)
+        (sandbox / "ASSESSMENT.md").write_text("real content")
+        result = validation.validate(
+            sandbox, {"added": ["ASSESSMENT.md"], "modified": [], "removed": []},
+            config={"require_tests": True},  # documentation_only_scope NOT set at all
+        )
+        check("REGRESSION: with no documentation_only_scope declared, a pure .md change still fails require_tests=True "
+              "(fail-closed default -- the doc-only lane is opt-in only, never inferred)",
+              not result.passed, result.to_json()["checks"])
 
 
 if __name__ == "__main__":

@@ -98,6 +98,21 @@ class Proposal:
     model_change_required: bool | None = None
     isolation_change_required: bool | None = None
     campaign_collision: bool | None = None
+    # DOCUMENTATION_VALIDATION_SEMANTICS (Founder-authorized 2026-09-09):
+    # OPTIONAL, additive declaration of intent -- NOT a completeness-gate
+    # requirement (unlike the 7 protected-action fields above, most
+    # proposals never set this; None/False is the safe, unchanged default).
+    # This field is a CLAIM, never independently sufficient: validation.py::
+    # check_tests() only ever honors it when the job's REAL, actually-
+    # changed files in the sandbox are evidence-confirmed to be pure
+    # documentation (see validation.py's _DOC_ONLY_EXTENSIONS allowlist) --
+    # a proposal that sets this True but whose real changes include any
+    # non-documentation file (.py, .sh, config, systemd units, etc.) has
+    # this claim ignored and falls straight back to normal behavioral-test
+    # requirements. This is what prevents a proposal from bypassing
+    # behavioral tests merely by declaring itself documentation-only in
+    # free text or in this field alone.
+    documentation_only_scope: bool | None = None
 
 
 # Event-driven pickup wake signal (mrsilent-autonomous-cycle.path watches
@@ -365,7 +380,7 @@ def refine(proposal_id: str, *, note: str = "", **fields: Any) -> Proposal:
     for supplying only real, canonical values — refine() itself has no way
     to verify truthfulness, only to record explicit answers precisely
     (never inventing scope/plans that were not actually provided)."""
-    allowed = set(DECISION_READY_FIELDS) | {"non_file_scope"}
+    allowed = set(DECISION_READY_FIELDS) | {"non_file_scope", "documentation_only_scope"}
     unknown = set(fields) - allowed
     if unknown:
         raise ValueError(f"refine() only accepts completeness-gate fields; unknown: {sorted(unknown)}")

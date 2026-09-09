@@ -288,6 +288,61 @@ def _clear_stale_test_caches(sandbox: Path) -> None:
             pass
 
 
+# DOCUMENTATION_VALIDATION_SEMANTICS (Founder-authorized 2026-09-09): a
+# deliberately narrow ALLOWLIST (never a blocklist) of extensions that can
+# ever satisfy documentation-only evidence. Real, live incident this
+# closes: proposals whose approved scope is genuinely a documentation/
+# report deliverable (e.g. rank 8's ASSESSMENT.md, rank 10's
+# pulseworld_survey_report.md -- both confirmed, real, correctly-produced
+# artifacts) were rejected purely because check_tests() demanded a
+# test_*.py/*_test.py file that makes no sense for a non-executable
+# deliverable. Deliberately excludes EVERY extension named in the Founder
+# policy's disallowed list (.py, .sh, .kt, .java, .js, .ts, config/
+# systemd/deployment formats, etc.) by construction -- an allowlist fails
+# closed on anything not explicitly named, a blocklist would not.
+_DOC_ONLY_EXTENSIONS = frozenset({".md", ".txt", ".rst"})
+
+
+def _documentation_only_evidence(sandbox: Path, files_changed: dict) -> CheckResult | None:
+    """Real-evidence-only documentation-scope confirmation -- NEVER trusts
+    a proposal's own documentation_only_scope declaration by itself. Only
+    called when that declaration is True; returns None (never a pass or a
+    fail) whenever the REAL, actually-changed sandbox files do not
+    themselves prove pure-documentation scope, so the caller falls
+    straight through to the exact same require_tests handling that would
+    apply if documentation_only_scope had never been set at all -- this
+    is what makes the flag impossible to bypass with by declaring it on a
+    code-changing proposal: real evidence, not the label, decides.
+
+    Returns a REAL CheckResult (pass or fail) only once evidence
+    genuinely confirms pure-documentation scope: at least one real file
+    was actually added/modified, every one of them has an extension in
+    _DOC_ONLY_EXTENSIONS, and none of them is empty (an empty 'deliverable'
+    is never treated as satisfying the scope)."""
+    changed = [p for p in _changed_paths(sandbox, files_changed) if p.exists()]
+    if not changed:
+        return None  # nothing real changed -- evidence does not confirm doc-only scope
+    non_doc = [p for p in changed if p.suffix.lower() not in _DOC_ONLY_EXTENSIONS]
+    if non_doc:
+        # Real evidence CONTRADICTS the declared scope -- never silently
+        # honored; falls through to normal behavioral-test requirements.
+        return None
+    empty = [p for p in changed if p.stat().st_size == 0]
+    if empty:
+        return CheckResult(
+            "documentation_only_validation", False,
+            f"documentation-only scope requires a real, non-empty artifact; empty: "
+            f"{[str(p.relative_to(sandbox)) for p in empty]}",
+            0.0,
+        )
+    return CheckResult(
+        "documentation_only_validation", True,
+        f"documentation-only scope confirmed by real evidence: {len(changed)} file(s) "
+        f"({', '.join(sorted({p.suffix for p in changed}))}), all non-empty, no executable/code file changed",
+        0.0,
+    )
+
+
 def check_tests(sandbox: Path, _files_changed: dict, config: dict) -> CheckResult | None:
     # VALIDATION SEMANTICS REPAIR (2026-09-07): real, live, mechanically-
     # verified incident this closes — job 9746cea9-449a-4f12-b358-
@@ -306,6 +361,14 @@ def check_tests(sandbox: Path, _files_changed: dict, config: dict) -> CheckResul
         return None
     has_tests = any(sandbox.rglob("test_*.py")) or any(sandbox.rglob("*_test.py"))
     if not has_tests:
+        if config.get("documentation_only_scope"):
+            doc_result = _documentation_only_evidence(sandbox, _files_changed)
+            if doc_result is not None:
+                return doc_result
+            # Evidence did NOT confirm doc-only scope (nothing changed, or
+            # a non-documentation file was among the real changes) -- the
+            # declared flag is ignored; fall through to the exact same
+            # require_tests handling as if it had never been set.
         if config.get("require_tests"):
             return CheckResult(
                 "test_discovery_and_run", False,

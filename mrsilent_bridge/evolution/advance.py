@@ -777,8 +777,20 @@ def _validation_config_for_proposal(p: proposal_mod.Proposal) -> dict[str, Any]:
     the completeness-gate schema) gets require_tests=False here -- BYTE-
     FOR-BYTE the same behavior as before this repair, config=None in every
     respect that matters to validation.validate(). Only a proposal that
-    HONESTLY declared its own validation_plan gets held to it."""
-    return {"require_tests": bool(p.validation_plan)}
+    HONESTLY declared its own validation_plan gets held to it.
+
+    DOCUMENTATION_VALIDATION_SEMANTICS (Founder-authorized 2026-09-09):
+    passes p.documentation_only_scope through as a config flag -- a CLAIM,
+    never independently sufficient on its own. validation.py::check_tests()
+    only ever honors it once the job's REAL, actually-changed sandbox
+    files are evidence-confirmed to be pure documentation (see that
+    function's own docstring and _DOC_ONLY_EXTENSIONS); a proposal that
+    sets this True but whose real changes include any non-documentation
+    file has the claim ignored and falls straight back to this exact
+    require_tests behavior, unchanged. A proposal that never sets it (the
+    overwhelming majority) gets byte-for-byte the same config as before
+    this repair."""
+    return {"require_tests": bool(p.validation_plan), "documentation_only_scope": bool(p.documentation_only_scope)}
 
 
 def _run_omni_engineer(task_text: str, requested_by: str, proposal_id: str) -> tuple[EngineAttempt, Any]:
